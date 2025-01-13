@@ -1,0 +1,20 @@
+[project]
+name = "sovia"
+version = "0.1.0"
+description = "SoviaMate - a framework for Conversational AI"
+authors = [
+    {name = "Samson", email = "samson-voice@gmail.com"}
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+]
+
+[tool.poetry]
+packages = [{include = "soviamate", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
