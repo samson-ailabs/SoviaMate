@@ -27,7 +27,13 @@ SoviaMate is an AI-powered assistant built to revolutionize speech and language 
     cd SoviaMate
     ```
 
-2. Install dependencies:
+2. Download large files:
+    ```sh
+    git lfs install
+    git lfs pull
+    ```
+
+3. Install dependencies:
     ```sh
     poetry lock && poetry install
     ```
