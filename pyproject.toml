@@ -1,7 +1,7 @@
 [project]
 name = "sovia"
 version = "0.1.0"
-description = "SoviaMate - a framework for Conversational AI"
+description = "Sovia - a framework for Conversational AI"
 authors = [
     {name = "Samson", email = "samson-voice@gmail.com"}
 ]
@@ -9,11 +9,18 @@ readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
+    "torch (>=2.5.1,<3.0.0)",
+    "torchaudio (>=2.5.1,<3.0.0)",
+    "hydra-core (>=1.3.2,<2.0.0)",
+    "lightning (>=2.5.0,<3.0.0)",
 ]
 
 [tool.poetry]
-packages = [{include = "soviamate", from = "src"}]
+packages = [{include = "sovia", from = "src"}]
 
+
+[tool.poetry.group.devel.dependencies]
+ipython = "^8.31.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
