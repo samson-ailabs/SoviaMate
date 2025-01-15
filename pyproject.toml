@@ -1,10 +1,8 @@
 [project]
-name = "sovia"
+name = "soviamate"
 version = "0.1.0"
-description = "Sovia - a framework for Conversational AI"
-authors = [
-    {name = "Samson", email = "samson-voice@gmail.com"}
-]
+description = "SoviaMate - a framework for Conversational AI"
+authors = [{name = "Samson", email = "samson-voice@gmail.com"}]
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
@@ -16,7 +14,7 @@ dependencies = [
 ]
 
 [tool.poetry]
-packages = [{include = "sovia", from = "src"}]
+packages = [{include = "soviamate"}]
 
 
 [tool.poetry.group.devel.dependencies]
