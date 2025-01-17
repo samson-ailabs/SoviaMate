@@ -46,6 +46,10 @@ We welcome contributions! Please check our [Contributing Guidelines](CONTRIBUTIN
 
 SoviaMate is licensed under the [Apache License 2.0](LICENSE).
 
+## Collaborators
+
+If you are interested in collaborating, please reach out to us at [contact@soviamate.com](mailto:contact@soviamate.com).
+
 ## Acknowledgments
 
 SoviaMate leverages cutting-edge research in speech processing and natural language understanding. Special thanks to the open-source community for providing tools and inspiration.
