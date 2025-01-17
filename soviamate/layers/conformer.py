@@ -33,6 +33,7 @@ class _SelfAttentionModule(nn.Module):
 
     def __init__(self, input_dim: int, num_heads: int, dropout: float) -> None:
         super().__init__()
+
         self.layer_norm = nn.LayerNorm(input_dim)
         self.attention = nn.MultiheadAttention(
             input_dim, num_heads, dropout=dropout, batch_first=True
@@ -44,16 +45,17 @@ class _SelfAttentionModule(nn.Module):
         inputs: torch.Tensor,
         padding_masks: torch.Tensor,
         attention_masks: torch.Tensor,
-        caches: torch.Tensor,
+        contexts: torch.Tensor,
     ) -> torch.Tensor:
         r"""
         Args:
             inputs (torch.Tensor): with shape `(B, T, D)`.
             padding_masks (torch.Tensor): with shape `(B, T)`.
-                A ``True`` value indicates the padding will be ignored.
+                A ``True`` value indicates the corresponding key value will be ignored.
             attention_masks (torch.Tensor): with shape `(T, T + left_context)`.
-                A ``True`` value indicates the padding will be ignored.
-            caches (torch.Tensor): with shape `(B, left_context, D)`.
+                A ``True`` value indicates the corresponding position is not allowed to attend.
+            contexts (torch.Tensor): with shape `(B, left_context, D)`.
+                The cached left context used in the streaming self-attention mechanism.
 
         Returns:
             torch.Tensor: outputs, with shape `(B, T, D)`.
@@ -61,8 +63,8 @@ class _SelfAttentionModule(nn.Module):
 
         q = self.layer_norm(inputs)
 
-        k = v = torch.cat([caches, q], dim=1)
-        caches = k[:, q.size(1) :, :]
+        k = v = torch.cat([contexts, q], dim=1)
+        cache = k[:, q.size(1) :, :]
 
         num_pads = attention_masks.size(1) - padding_masks.size(1)
         padding_masks = F.pad(padding_masks, (num_pads, 0), value=0)
@@ -73,7 +75,7 @@ class _SelfAttentionModule(nn.Module):
 
         x = self.dropout(x)
 
-        return x, caches
+        return x, cache
 
 
 class _ConvolutionModule(nn.Module):
@@ -81,18 +83,17 @@ class _ConvolutionModule(nn.Module):
 
     Args:
         input_dim (int): input dimension.
-        num_channels (int): number of depthwise convolution layer input channels.
         kernel_size (int): kernel size of depthwise convolution layer.
         dropout (float): dropout probability.
     """
 
     def __init__(self, input_dim: int, kernel_size: int, dropout: float) -> None:
-
         super().__init__()
-        self.left_context = kernel_size - 1
 
         if (kernel_size - 1) % 2 != 0:
             raise ValueError("kernel_size must be odd to achieve 'SAME' padding.")
+
+        self.left_context = kernel_size - 1
 
         self.layer_norm1 = nn.LayerNorm(input_dim)
         self.pointwise_conv1 = nn.Conv1d(input_dim, 2 * input_dim, 1)
@@ -105,17 +106,19 @@ class _ConvolutionModule(nn.Module):
         self.layer_norm2 = nn.LayerNorm(input_dim)
         self.activation2 = nn.SiLU()
         self.pointwise_conv2 = nn.Conv1d(input_dim, input_dim, 1)
+
         self.dropout = nn.Dropout(dropout)
 
     def forward(
-        self, inputs: torch.Tensor, padding_masks: torch.Tensor, caches: torch.Tensor
+        self, inputs: torch.Tensor, padding_masks: torch.Tensor, contexts: torch.Tensor
     ) -> torch.Tensor:
         r"""
         Args:
             inputs (torch.Tensor): with shape `(B, T, D)`.
             padding_masks (torch.Tensor): with shape `(B, T)`.
-                A ``True`` value indicates the padding will be ignored.
-            caches (torch.Tensor): with shape `(B, D, left_padding)`.
+                A ``True`` value indicates the corresponding value will be ignored.
+            contexts (torch.Tensor): with shape `(B, D, kernel_size - 1)`.
+                The cached left context used in the streaming convolution mechanism.
 
         Returns:
             torch.Tensor: outputs, with shape `(B, T, D)`.
@@ -130,8 +133,8 @@ class _ConvolutionModule(nn.Module):
         mask = padding_masks.unsqueeze(1)
         x = x.masked_fill(mask, 0.0)
 
-        x = torch.cat([caches, x], dim=2)
-        caches = x[:, :, -self.left_context :]
+        x = torch.cat([contexts, x], dim=2)
+        cache = x[:, :, -self.left_context :]
         x = self.depthwise_conv(x)
 
         x = x.transpose(1, 2)
@@ -144,7 +147,7 @@ class _ConvolutionModule(nn.Module):
 
         x = x.transpose(1, 2)
 
-        return x, caches
+        return x, cache
 
 
 class _FeedForwardModule(nn.Module):
@@ -153,11 +156,12 @@ class _FeedForwardModule(nn.Module):
     Args:
         input_dim (int): input dimension.
         hidden_dim (int): hidden dimension.
-        dropout (float, optional): dropout probability.
+        dropout (float): dropout probability.
     """
 
     def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
         super().__init__()
+
         self.sequential = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
@@ -170,22 +174,22 @@ class _FeedForwardModule(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            input (torch.Tensor): with shape `(*, D)`.
+            inputs (torch.Tensor): with shape `(*, D)`.
 
         Returns:
-            torch.Tensor: output, with shape `(*, D)`.
+            torch.Tensor: outputs, with shape `(*, D)`.
         """
         return self.sequential(inputs)
 
 
 class ConformerLayer(nn.Module):
-    r"""Conformer layer that constitutes Conformer.
+    r"""The layer that constitutes Conformer model.
 
     Args:
         input_dim (int): input dimension.
         ffn_dim (int): hidden layer dimension of feedforward network.
-        attn_num_heads (int): number of attention heads.
-        conv_kernel_size (int): kernel size of depthwise convolution layer.
+        num_heads (int): number of attention heads.
+        kernel_size (int): kernel size of depthwise convolution layer.
         dropout (float, optional): dropout probability. (Default: 0.0)
     """
 
@@ -193,25 +197,17 @@ class ConformerLayer(nn.Module):
         self,
         input_dim: int,
         ffn_dim: int,
-        attn_num_heads: int,
-        conv_kernel_size: int,
+        num_heads: int,
+        kernel_size: int,
         dropout: float = 0.0,
     ) -> None:
-
         super().__init__()
 
-        self.ffn1_module = _FeedForwardModule(input_dim, ffn_dim, dropout=dropout)
-        self.ffn2_module = _FeedForwardModule(input_dim, ffn_dim, dropout=dropout)
-
-        self.attn_module = _SelfAttentionModule(
-            input_dim, attn_num_heads, dropout=dropout
-        )
-
-        self.conv_module = _ConvolutionModule(
-            input_dim, conv_kernel_size, dropout=dropout
-        )
-
-        self.final_layer_norm = nn.LayerNorm(input_dim)
+        self.ffn1_module = _FeedForwardModule(input_dim, ffn_dim, dropout)
+        self.attn_module = _SelfAttentionModule(input_dim, num_heads, dropout)
+        self.conv_module = _ConvolutionModule(input_dim, kernel_size, dropout)
+        self.ffn2_module = _FeedForwardModule(input_dim, ffn_dim, dropout)
+        self.layer_norm = nn.LayerNorm(input_dim)
 
     def forward(
         self,
@@ -225,9 +221,7 @@ class ConformerLayer(nn.Module):
         Args:
             x (torch.Tensor): input, with shape `(B, T, D)`.
             conv_mask (torch.Tensor): convolution mask, with shape `(B, T)`.
-                A ``True`` value indicates that the corresponding value will be ignored.
             attn_mask (torch.Tensor): attention mask, with shape `(T, T + left_context)`.
-                A ``True`` value indicates that the corresponding value will be ignored.
             conv_cache (torch.Tensor): convolution cache, with shape `(B, D, kernel_size - 1)`.
             attn_cache (torch.Tensor): attention cache, with shape `(B, left_context, D)`.
 
@@ -251,6 +245,6 @@ class ConformerLayer(nn.Module):
         x = self.ffn2_module(x)
         x = x * 0.5 + residual
 
-        x = self.final_layer_norm(x)
+        x = self.layer_norm(x)
 
         return x, conv_cache, attn_cache
