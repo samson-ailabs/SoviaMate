@@ -10,7 +10,7 @@
 
 1. [TS3-Codec: Transformer-Based Simple Streaming Single Codec](https://arxiv.org/pdf/2411.18803)
 
-2. [SimVQ: Addressing Representation Collapse in Vector Quantized Models with One Linear Layer](https://arxiv.org/pdf/2411.02038)
+2. [TAAE: Scaling Transformers for Low-Bitrate High-Quality Speech Coding](https://arxiv.org/pdf/2411.19842)
 
 ## Large Language Models
 
