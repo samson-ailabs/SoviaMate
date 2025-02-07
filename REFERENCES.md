@@ -12,6 +12,8 @@
 
 2. [TAAE: Scaling Transformers for Low-Bitrate High-Quality Speech Coding](https://arxiv.org/pdf/2411.19842)
 
+3. [Wave-U-Net Discriminator: Fast and Lightweight Discriminator for Generative Adversarial Network-Based Speech Synthesis](https://arxiv.org/pdf/2303.13909)
+
 ## Large Language Models
 
 1. [SLAM-Omni: Timbre-Controllable Voice Interaction System with Single-Stage Training](https://arxiv.org/pdf/2412.15649)
