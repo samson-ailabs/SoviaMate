@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Multimodal Decoder for audio and visual inputs """
+"""Multimodal Decoder for audio and visual inputs"""
 
 import random
 from typing import List, Tuple
@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
-from soviamate.utils.utility import make_padding_mask, make_attention_mask
+from soviamate.utils.helper import make_padding_mask, make_attention_mask
 
 
 class AudioDecoder(nn.Module):
