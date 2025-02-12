@@ -14,7 +14,10 @@
 
 """Discriminators for adversarial training"""
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> e90288622b6ba4a6adfdaec345383e797796ac61
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -96,12 +99,7 @@ class _ResBlockUp(nn.Module):
 
         self.res_upsm = nn.Upsample(scale_factor=2, mode="nearest")
         self.res_conv = nn.ConvTranspose2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            output_padding=1,
+            in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
         )
         self.res_proj = nn.Conv2d(
             out_channels, out_channels, kernel_size=3, stride=1, padding=1
