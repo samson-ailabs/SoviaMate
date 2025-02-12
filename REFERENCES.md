@@ -4,7 +4,7 @@
 
 1. [WavChat: A Survey of Spoken Dialogue Models](https://arxiv.org/pdf/2411.13577)
 
-2. [TouchTTS: An Embarrassingly Simple TTS Framework that Everyone Can Touch](https://arxiv.org/pdf/2412.08237v1)
+2. [Recent Advances in Discrete Speech Tokens: A Review](https://arxiv.org/pdf/2502.06490)
 
 ## Neural Codec Models
 
