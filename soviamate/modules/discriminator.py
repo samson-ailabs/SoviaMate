@@ -14,10 +14,6 @@
 
 """Discriminators for adversarial training"""
 
-<<<<<<< HEAD
-
-=======
->>>>>>> e90288622b6ba4a6adfdaec345383e797796ac61
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
