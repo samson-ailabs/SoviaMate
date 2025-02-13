@@ -153,7 +153,7 @@ class SpecUnetDisc(nn.Module):
             n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=None
         )
 
-        self.conv1 = nn.Conv2d(2, 16, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(2, 16, kernel_size=3, stride=2, padding=1)
         self.conv2 = nn.Conv2d(16, 1, kernel_size=3, stride=2, padding=1)
 
         self.down1 = _ResBlockDown(16, 32)
