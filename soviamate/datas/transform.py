@@ -37,7 +37,17 @@ class TimeStretch:
         self.max_speed_rate = max_speed_rate
         self.probability = probability
 
-    def __call__(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        r"""Apply the time stretch effect to the waveform.
+
+        Args:
+            waveform (Tensor): input waveform
+            sample_rate (int): sample rate of the waveform
+
+        Returns:
+            Tensor: waveform with the time stretch effect applied
+        """
+
         factor = random.uniform(self.min_speed_rate, self.max_speed_rate)
         effector = torchaudio.io.AudioEffector(effect=f"atempo={factor}", pad_end=False)
 
@@ -65,7 +75,17 @@ class PitchShift:
         self.max_pitch_rate = max_pitch_rate
         self.probability = probability
 
-    def __call__(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        r"""Apply the pitch shift effect to the waveform.
+
+        Args:
+            waveform (Tensor): input waveform
+            sample_rate (int): sample rate of the waveform
+
+        Returns:
+            Tensor: waveform with the pitch shift effect applied
+        """
+
         factor = random.uniform(self.min_pitch_rate, self.max_pitch_rate)
         effector = torchaudio.io.AudioEffector(
             effect=f"asetrate={sample_rate}*{factor},atempo=1/{factor}", pad_end=False
