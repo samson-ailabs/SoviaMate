@@ -14,6 +14,8 @@
 
 """Discriminators for adversarial training"""
 
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -141,51 +143,52 @@ class SpecUnetDisc(nn.Module):
     r"""A U-Net based discriminator that operates on the spectrogram domain.
 
     Args:
-        n_fft (int): number of Fourier bins
-        win_length (int): window size
-        hop_length (int): length of hop between STFT windows
+        n_ffts (List[int]): list of FFT sizes for each spectrogram
+        win_lengths (List[int]): list of window lengths for each spectrogram
+        hop_lengths (List[int]): list of hop lengths for each spectrogram
     """
 
-    def __init__(self, n_fft: int, win_length: int, hop_length: int) -> None:
+    def __init__(
+        self, n_ffts: List[int], win_lengths: List[int], hop_lengths: List[int]
+    ) -> None:
         super().__init__()
 
-        self.spectrum = T.Spectrogram(
-            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=None
-        )
+        assert (
+            len(n_ffts) == len(win_lengths) == len(hop_lengths)
+        ), "Lengths of n_ffts, win_lengths, and hop_lengths must be the same"
 
-        self.conv1 = nn.Conv2d(2, 16, kernel_size=3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(16, 1, kernel_size=3, stride=2, padding=1)
+        self.spectrograms = nn.ModuleList()
+        for n_fft, win_length, hop_length in zip(n_ffts, win_lengths, hop_lengths):
+            self.spectrograms.append(
+                T.Spectrogram(
+                    n_fft=n_fft,
+                    win_length=win_length,
+                    hop_length=hop_length,
+                    power=None,
+                )
+            )
 
-        self.down1 = _ResBlockDown(16, 32)
-        self.down2 = _ResBlockDown(32, 64)
-        self.down3 = _ResBlockDown(64, 128)
-        self.down4 = _ResBlockDown(128, 256)
-        self.down5 = _ResBlockDown(256, 512)
+        self.conv1 = nn.Conv2d(2, 32, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=2, padding=1)
 
-        self.ccat1 = nn.Conv2d(512, 256, kernel_size=1, stride=1)
-        self.ccat2 = nn.Conv2d(256, 128, kernel_size=1, stride=1)
-        self.ccat3 = nn.Conv2d(128, 64, kernel_size=1, stride=1)
-        self.ccat4 = nn.Conv2d(64, 32, kernel_size=1, stride=1)
+        self.down1 = _ResBlockDown(32, 64)
+        self.down2 = _ResBlockDown(64, 128)
+        self.down3 = _ResBlockDown(128, 256)
+        self.down4 = _ResBlockDown(256, 512)
+        self.down5 = _ResBlockDown(512, 1024)
 
-        self.upsm1 = _ResBlockUp(512, 256)
-        self.upsm2 = _ResBlockUp(256, 128)
-        self.upsm3 = _ResBlockUp(128, 64)
-        self.upsm4 = _ResBlockUp(64, 32)
-        self.upsm5 = _ResBlockUp(32, 16)
+        self.ccat1 = nn.Conv2d(1024, 512, kernel_size=1, stride=1)
+        self.ccat2 = nn.Conv2d(512, 256, kernel_size=1, stride=1)
+        self.ccat3 = nn.Conv2d(256, 128, kernel_size=1, stride=1)
+        self.ccat4 = nn.Conv2d(128, 64, kernel_size=1, stride=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Forward pass of the discriminator.
+        self.upsm1 = _ResBlockUp(1024, 512)
+        self.upsm2 = _ResBlockUp(512, 256)
+        self.upsm3 = _ResBlockUp(256, 128)
+        self.upsm4 = _ResBlockUp(128, 64)
+        self.upsm5 = _ResBlockUp(64, 32)
 
-        Args:
-            x (Tensor): input tensor with shape (B, 1, T)
-
-        Returns:
-            Tensor: output tensor
-        """
-
-        x = self.spectrum(x.squeeze(1))
-        x = F.pad(x, (0, -1, 0, -1))
-
+    def _forward_spectrogram(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.view_as_real(x)
         x = x.permute(0, 3, 1, 2)
 
@@ -214,3 +217,22 @@ class SpecUnetDisc(nn.Module):
         x = x.flatten(start_dim=1)
 
         return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Forward pass of the discriminator.
+
+        Args:
+            x (Tensor): waveform input tensor, shape (B, 1, T)
+
+        Returns:
+            Tensor: latent output tensor, shape (B, T')
+        """
+
+        outs = []
+        for spectrogram in self.spectrograms:
+            spec = spectrogram(x.squeeze(1))[:, :-1, :-1]
+            outs.append(self._forward_spectrogram(spec))
+
+        outs = torch.cat(outs, dim=1)
+
+        return outs
