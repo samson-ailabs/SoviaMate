@@ -190,3 +190,39 @@ class AudioDecoder(nn.Module):
         attn_cache = torch.zeros(batch_size, left_context, self.embed_dim)
 
         return [[conv_cache, attn_cache] for _ in range(len(self.layers))]
+
+
+class TextDecoder(nn.Module):
+    r"""Text Decoder for speech recognition and other text processing tasks.
+
+    Args:
+        input_dim (int): output dimension of the encoder.
+        hidden_dim (int): hidden dimension for the decoder.
+        output_dim (int): number of output classes.
+        dropout (float): dropout probability for the decoder.
+    """
+
+    def __init__(
+        self, input_dim: int, hidden_dim: int, output_dim: int, dropout: float
+    ) -> None:
+
+        super().__init__()
+
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, encoder_outpus: torch.Tensor) -> torch.Tensor:
+        r"""Forward pass for the text decoder.
+
+        Args:
+            encoder_outpus (Tensor): encoder outputs with shape `(B, T, D)`.
+
+        Returns:
+            Tensor: output tensor with shape `(B, T, V)`.
+        """
+
+        return self.network(encoder_outpus)

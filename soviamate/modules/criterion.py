@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as T
 
+from soviamate.layers.recognizer import Predictor, Joint
 from soviamate.utils.helper import make_padding_mask
 
 
@@ -132,5 +133,113 @@ class MultiResolutionSTFTLoss(nn.Module):
 
         loss = F.l1_loss(xs, ys, reduction="none")
         loss = (loss * masks).sum() / masks.sum()
+
+        return loss
+
+
+class SequenceToSequenceLoss(nn.Module):
+    r"""Integrate CTC and RNN-T loss for training sequence-to-sequence models.
+
+    Args:
+        embedding_dim (int): dimension of the embedding layer.
+        encoder_dim (int): dimension of the encoder outputs.
+        predictor_dim (int): dimension of the predictor outputs.
+        joint_dim (int): dimension of the joint outputs.
+        context_size (int): size of the context window.
+        vocab_size (int): size of the vocabulary.
+        dropout (float): dropout probability.
+        num_samples (int): number of samples for sampled softmax.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        encoder_dim: int,
+        predictor_dim: int,
+        joint_dim: int,
+        context_size: int,
+        vocab_size: int,
+        dropout: float,
+        num_samples: int,
+    ) -> None:
+
+        super().__init__()
+        self.blank_token = 0
+
+        self.vocab_size = vocab_size
+        self.num_samples = num_samples
+
+        self.predictor = Predictor(
+            embedding_dim, predictor_dim, vocab_size, context_size, dropout
+        )
+
+        self.joint = Joint(encoder_dim, predictor_dim, joint_dim)
+        self.linear = nn.Linear(joint_dim, vocab_size)
+
+        self.ctc_loss = nn.CTCLoss(blank=self.blank_token, zero_infinity=True)
+        self.rnnt_loss = T.RNNTLoss(blank=self.blank_token, fused_log_softmax=True)
+
+    def forward(
+        self,
+        encoder_outputs: torch.Tensor,
+        encoder_lengths: torch.Tensor,
+        decoder_outputs: torch.Tensor,
+        decoder_lengths: torch.Tensor,
+        target_tokens: torch.Tensor,
+        target_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""Compute the sequence-to-sequence loss.
+
+        Args:
+            encoder_outputs (Tensor): encoder outputs, shape `(B, T, D)`.
+            encoder_lengths (Tensor): lengths of the encoder outputs, shape `(B,)`.
+            decoder_outputs (Tensor): decoder outputs, shape `(B, T, D)`.
+            decoder_lengths (Tensor): lengths of the decoder outputs, shape `(B,)`.
+            target_tokens (Tensor): target sequences, shape `(B, U)`.
+            target_lengths (Tensor): lengths of the target sequences, shape `(B,)`.
+
+        Returns:
+            Tensor: combined loss of CTC and RNN-T.
+        """
+
+        log_probs = decoder_outputs.permute(1, 0, 2)
+        log_probs = F.log_softmax(log_probs, dim=2)
+
+        ctc_loss = self.ctc_loss(
+            log_probs, target_tokens, decoder_lengths, target_lengths
+        )
+
+        predictor_outputs, _ = self.predictor(target_tokens, target_lengths)
+        joint_outputs = self.joint(encoder_outputs, predictor_outputs)
+
+        with torch.no_grad():
+            pad_masks = make_padding_mask(decoder_lengths)
+            pad_masks = (~pad_masks)[:, :, None]
+
+            ctc_probs = (decoder_outputs * pad_masks).sum(1)
+            ctc_probs = ctc_probs / decoder_lengths.unsqueeze(1)
+
+            batch_idxs = torch.arange(ctc_probs.size(0), device=ctc_probs.device)
+            ctc_probs[batch_idxs.unsqueeze(1), target_tokens] = float("inf")
+
+            top_tokens = ctc_probs[:, 1:].topk(self.num_samples, dim=1)[1]
+            top_tokens = top_tokens.sort(dim=1).values + 1
+
+            samples = F.pad(top_tokens, (1, 0), value=self.blank_token)
+
+        targets = target_tokens[:, :, None] > samples[:, None, :]
+        targets = targets.sum(dim=2).clamp(min=1).type(torch.int32)
+
+        weight = self.linear.weight[samples]
+        bias = self.linear.bias[samples]
+
+        logits = torch.einsum("btuv,bsv->btus", joint_outputs, weight)
+        logits = logits + bias[:, None, None, :]
+
+        rnnt_loss = self.rnnt_loss(
+            logits, targets, encoder_lengths.int(), target_lengths.int()
+        )
+
+        loss = ctc_loss + rnnt_loss
 
         return loss
