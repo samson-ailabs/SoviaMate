@@ -16,6 +16,14 @@
 
 4. [Memory-Efficient Training of RNN-Transducer with Sampled Softmax](https://arxiv.org/pdf/2203.16868)
 
+5. [RefXVC: Cross-Lingual Voice Conversion with Enhanced Reference Leveraging](https://arxiv.org/pdf/2406.16326)
+
 ## Large Language Models
 
 1. [SLAM-Omni: Timbre-Controllable Voice Interaction System with Single-Stage Training](https://arxiv.org/pdf/2412.15649)
+
+## Miscellaneous
+
+1. [Reshape Dimensions Network for Speaker Recognition](https://arxiv.org/pdf/2407.18223)
+
+2. [Fast Context-Biasing for CTC and Transducer ASR models with CTC-based Word Spotter](https://arxiv.org/pdf/2406.07096)
