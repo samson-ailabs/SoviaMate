@@ -14,7 +14,32 @@
 
 """Utility functions for various tasks"""
 
+import json
+from typing import Any, Dict, List, Union
+
 import torch
+
+
+def load_dataset(filepaths: Union[str, List[str]]) -> List[Dict[str, Any]]:
+    r"""Loads the dataset from the filepaths.
+
+    Args:
+        filepaths (Union[str, List[str]]): The filepaths to the dataset.
+
+    Returns:
+        List[Dict[str, Any]]
+            The dataset loaded from the filepaths.
+    """
+
+    if isinstance(filepaths, str):
+        filepaths = [filepaths]
+
+    dataset = []
+    for filepath in filepaths:
+        with open(filepath, mode="r", encoding="utf-8") as f:
+            dataset += [json.loads(line) for line in f]
+
+    return dataset
 
 
 def make_padding_mask(lengths: torch.Tensor) -> torch.Tensor:
