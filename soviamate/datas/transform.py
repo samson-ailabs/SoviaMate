@@ -145,7 +145,7 @@ class NoiseInjection:
     r"""Inject background noise into the audio signal.
 
     Args:
-        noise_filepaths: List of filepaths to the noise audio files.
+        noise_filepaths: List of metadata filepaths for the noise samples.
         min_amplitude: Minimum amplitude of the noise.
         max_amplitude: Maximum amplitude of the noise.
         probability: Probability of applying the noise injection.
@@ -210,7 +210,7 @@ class ImpulseResponse:
     r"""Apply the impulse response effect to the audio signal.
 
     Args:
-        rir_filepaths: List of filepaths to the impulse response audio files.
+        rir_filepaths: List of metadata filepaths for the impulse response samples.
         probability: Probability of applying the impulse response.
     """
 
