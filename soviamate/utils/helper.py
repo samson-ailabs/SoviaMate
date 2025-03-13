@@ -18,6 +18,7 @@ import json
 from typing import Any, Dict, List, Union
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 
 def load_dataset(filepaths: Union[str, List[str]]) -> List[Dict[str, Any]]:
@@ -40,6 +41,30 @@ def load_dataset(filepaths: Union[str, List[str]]) -> List[Dict[str, Any]]:
             dataset += [json.loads(line) for line in f]
 
     return dataset
+
+
+def stack_batches(
+    sequences: List[torch.Tensor], padding_value: float = 0.0
+) -> torch.Tensor:
+    r"""Stacks the input sequences into a batch tensor.
+
+    Args:
+        sequences (List[Tensor]): The input sequences to be padded, each with shape
+            ``(*, T)`` where ``T`` is the length of the sequence.
+        padding_value (float, optional): The padding value. Defaults to 0.0.
+
+    Returns:
+        Tensor
+            The padded sequences.
+    """
+
+    sequences = [seq.t() for seq in sequences]
+    lengths = [seq.size(0) for seq in sequences]
+
+    sequences = pad_sequence(sequences, batch_first=True, padding_value=padding_value)
+    lengths = torch.tensor(lengths, device=sequences.device, dtype=torch.long)
+
+    return sequences, lengths
 
 
 def make_padding_mask(lengths: torch.Tensor) -> torch.Tensor:
