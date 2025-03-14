@@ -215,7 +215,7 @@ class TextDecoder(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def forward(self, encoder_outpus: torch.Tensor) -> torch.Tensor:
+    def forward(self, encoder_outputs: torch.Tensor) -> torch.Tensor:
         r"""Forward pass for the text decoder.
 
         Args:
@@ -225,4 +225,4 @@ class TextDecoder(nn.Module):
             Tensor: output tensor with shape `(B, T, V)`.
         """
 
-        return self.network(encoder_outpus)
+        return self.network(encoder_outputs)
