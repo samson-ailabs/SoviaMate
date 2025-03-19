@@ -20,7 +20,7 @@ import tiktoken
 
 
 class Tokenizer:
-    r"""Tokenizer for use with OpenAI's models
+    r"""Wrapper for OpenAI's tiktoken that preserves index 0 as a special blank token.
 
     Args:
         model_name (str, optional): The name of the model to use for tokenization.
@@ -44,12 +44,12 @@ class Tokenizer:
     @property
     def vocab_size(self) -> int:
         r"""The size of the vocabulary"""
-        return self.tokenizer.n_vocab
+        return self.tokenizer.n_vocab + 1
 
     def encode(self, text: str) -> List[int]:
         r"""Encode a text string into a list of token ids"""
-        return self.tokenizer.encode(text)
+        return [idx + 1 for idx in self.tokenizer.encode(text)]
 
     def decode(self, tokens: List[int]) -> str:
         r"""Decode a list of token ids into a text string"""
-        return self.tokenizer.decode(tokens)
+        return self.tokenizer.decode([idx - 1 for idx in tokens])
