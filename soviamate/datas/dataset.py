@@ -44,9 +44,14 @@ class AudioCodecDataset(Dataset):
         self.tokenizer = instantiate(tokenizer)
 
         if transforms.get("audio") is not None:
-            self.audio_transforms = instantiate(transforms.audio)
+            self.audio_transforms = [
+                instantiate(transform) for transform in transforms.audio.values()
+            ]
+
         if transforms.get("prompt") is not None:
-            self.prompt_transforms = instantiate(transforms.prompt)
+            self.prompt_transforms = [
+                instantiate(transform) for transform in transforms.prompt.values()
+            ]
 
     def __len__(self):
         return len(self.dataset)
