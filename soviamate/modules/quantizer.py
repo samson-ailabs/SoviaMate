@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Vector and Scalar Quantization """
+"""Vector and Scalar Quantization"""
 
 from typing import List
 
@@ -21,7 +21,7 @@ import torch.nn as nn
 
 
 class FiniteScalarQuantization(nn.Module):
-    """Finite Scalar Quantization with symmetry-preserving and noise-approximated quantization
+    r"""Finite Scalar Quantization with symmetry-preserving and noise-approximated quantization
     based on *Scaling Transformers for Low-Bitrate High-Quality Speech Coding* by Stability AI.
 
     Args:
@@ -40,6 +40,8 @@ class FiniteScalarQuantization(nn.Module):
     ):
         super().__init__()
 
+        assert num_codebooks == 1, "Only support single codebook for now."
+
         self.num_codebooks = num_codebooks
         self.noise_dropout = noise_dropout
 
@@ -56,27 +58,31 @@ class FiniteScalarQuantization(nn.Module):
 
     @torch.autocast(device_type="cuda", enabled=False)
     def _quantize_vectors(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.float()
+        x = torch.tanh(x.type(torch.float))
+        noise = (torch.rand_like(x) - 0.5) * 2 / (self.levels - 1)
 
-        half_width = 2 / (self.levels - 1)
-        noise = (torch.rand_like(x) - 0.5) * half_width
-
-        qx = self._symmetry_preserving_bound(x)
-        qx = self._straight_through_gradient(qx)
+        qx = self._inverse_scale_and_shift(
+            self._straight_through_gradient(self._scale_and_shift(x))
+        )
 
         if self.training:
             mask = self._generate_random_mask(x)
-            qx = torch.where(mask, x, qx * half_width)
+            qx = torch.where(mask, x, qx)
 
             mask = self._generate_random_mask(x)
-            qx = torch.where(mask, x + noise, qx)
-        else:
-            qx = qx * half_width
+            qx = torch.where(mask, qx, x + noise)
 
         return qx
 
-    def forward(self, inputs: torch.Tensor):
-        """Forward pass of the quantizer."""
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        r"""Forward pass of the quantizer.
+
+        Args:
+            inputs (Tensor): input tensor, shape (B, T, D).
+
+        Returns:
+            Tensor: quantized tensor, shape (B, T, D).
+        """
 
         batch_size, seq_len, _ = inputs.size()
 
@@ -92,7 +98,14 @@ class FiniteScalarQuantization(nn.Module):
 
     @torch.jit.export
     def encode(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Encode input tensor to quantized tensor."""
+        r"""Encode input tensor to quantized tensor.
+
+        Args:
+            inputs (Tensor): input tensor, shape (B, T, D).
+
+        Returns:
+            Tensor: discrete indices, shape (B, T, 1).
+        """
 
         batch_size, seq_len, _ = inputs.size()
 
@@ -106,7 +119,14 @@ class FiniteScalarQuantization(nn.Module):
 
     @torch.jit.export
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
-        """Decode quantized tensor to original tensor."""
+        r"""Decode quantized tensor to original tensor.
+
+        Args:
+            indices (Tensor): discrete indices, shape (B, T, 1).
+
+        Returns:
+            Tensor: quantized tensor, shape (B, T, D).
+        """
 
         batch_size, seq_len, num_codebooks = indices.size()
         codebook_dim = num_codebooks * len(self.levels)
@@ -130,16 +150,14 @@ class FiniteScalarQuantization(nn.Module):
 
     def _generate_random_mask(self, x: torch.Tensor):
         mask = torch.full((x.size(0),), self.noise_dropout, device=x.device)
-        mask = torch.bernoulli(mask).bool()[:, None, None, None].expand_as(x)
+        mask = torch.bernoulli(mask)[:, None, None, None].bool().expand_as(x)
         return mask
 
-    def _scale_and_shift(self, x: torch.Tensor):
-        half_width = (self.levels - 1) / 2
-        return (x * half_width) + half_width
+    def _scale_and_shift(self, z: torch.Tensor):
+        return (z + 1) * (self.levels - 1) / 2
 
-    def _inverse_scale_and_shift(self, x: torch.Tensor):
-        half_width = (self.levels - 1) / 2
-        return (x - half_width) / half_width
+    def _inverse_scale_and_shift(self, idxs: torch.Tensor):
+        return idxs * 2 / (self.levels - 1) - 1
 
     def _indices_to_level_indices(self, indices: torch.Tensor):
         indices = indices.unsqueeze(-1)
@@ -153,5 +171,6 @@ class FiniteScalarQuantization(nn.Module):
 
     def _codes_to_indices(self, qx: torch.Tensor):
         qx = self._scale_and_shift(qx)
+        qx = qx.round().type(torch.int64)
         idx = (qx * self.basis).sum(dim=-1)
-        return idx.type(torch.int64)
+        return idx
