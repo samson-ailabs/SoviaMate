@@ -26,8 +26,8 @@ from torch.utils.data import Dataset
 from soviamate.utils.helper import load_dataset, stack_batches
 
 
-class NeuralCodecDataset(Dataset):
-    r"""The dataset class for training the neural codec model.
+class AudioCodecDataset(Dataset):
+    r"""The dataset class for training the audio codec model.
 
     Args:
         filepaths (List[str]): The list of metadata filepaths.

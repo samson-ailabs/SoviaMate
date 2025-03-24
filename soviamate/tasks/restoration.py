@@ -27,8 +27,8 @@ from torch.utils.data import DataLoader
 SEGMENT_SIZE = 16000
 
 
-class AudioNeuralCodec(L.LightningModule):
-    """Audio Neural Codec Model for learning audio discrete tokens.
+class AudioCodecTask(L.LightningModule):
+    """Audio Neural Codec Task for learning audio discrete tokens.
 
     Args:
         dataset (DictConfig): Configuration for the dataset.
