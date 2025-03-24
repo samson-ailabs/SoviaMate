@@ -101,7 +101,7 @@ class AudioDecoder(nn.Module):
         x_lens = lengths
 
         chunk_size, left_context = random.choice(self.attn_contexts)
-        zero_caches = self._initiate_states(xs.size(0), left_context)
+        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
@@ -138,7 +138,7 @@ class AudioDecoder(nn.Module):
             raise ValueError("The segment size does not match the chunk size.")
 
         if caches is None:
-            caches = self._initiate_states(batch_size, self.left_context)
+            caches = self._initiate_states(batch_size, self.left_context, device)
 
         xs = segments
         x_lens = torch.tensor([self.chunk_size] * batch_size, device=device)
@@ -173,21 +173,26 @@ class AudioDecoder(nn.Module):
         self.left_context = left_context
 
     def _initiate_states(
-        self, batch_size: int, left_context: int
+        self, batch_size: int, left_context: int, device: torch.device
     ) -> List[List[torch.Tensor]]:
         r"""Initiate empty states for streaming inference.
 
         Args:
             batch_size (int): batch size for the input.
             left_context (int): left context length for the attention module.
+            device (torch.device): device for the tensors.
 
         Returns:
             List[List[torch.Tensor]]: list of lists of tensors representing
                 internal state for each convolution and attention module.
         """
 
-        conv_cache = torch.zeros(batch_size, self.embed_dim, self.kernel_size - 1)
-        attn_cache = torch.zeros(batch_size, left_context, self.embed_dim)
+        conv_cache = torch.zeros(
+            batch_size, self.embed_dim, self.kernel_size - 1, device=device
+        )
+        attn_cache = torch.zeros(
+            batch_size, left_context, self.embed_dim, device=device
+        )
 
         return [[conv_cache, attn_cache] for _ in range(len(self.layers))]
 
