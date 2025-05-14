@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Unified Streaming and Non-Streaming Conformer """
+"""Unified Streaming and Non-Streaming Conformer"""
 
 import torch
 import torch.nn as nn
@@ -68,6 +68,9 @@ class _SelfAttentionModule(nn.Module):
 
         num_pads = attention_masks.size(1) - padding_masks.size(1)
         padding_masks = F.pad(padding_masks, (num_pads, 0), value=0)
+
+        padding_masks = padding_masks.type(q.dtype)
+        attention_masks = attention_masks.type(q.dtype)
 
         x, _ = self.attention(
             q, k, v, key_padding_mask=padding_masks, attn_mask=attention_masks

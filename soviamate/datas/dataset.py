@@ -36,19 +36,19 @@ class AudioCodecDataset(Dataset):
     """
 
     def __init__(
-        self, filepaths: List[str], tokenizer: DictConfig, transforms: DictConfig
+        self, filepaths: List[str], tokenizer: DictConfig, transforms: DictConfig = None
     ):
         super().__init__()
 
         self.dataset = load_dataset(filepaths)
         self.tokenizer = instantiate(tokenizer)
 
-        if transforms.get("audio") is not None:
+        if transforms and transforms.get("audio") is not None:
             self.audio_transforms = [
                 instantiate(transform) for transform in transforms.audio.values()
             ]
 
-        if transforms.get("prompt") is not None:
+        if transforms and transforms.get("prompt") is not None:
             self.prompt_transforms = [
                 instantiate(transform) for transform in transforms.prompt.values()
             ]
