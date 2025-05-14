@@ -169,3 +169,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Hydra logging
+outputs/
+
+# Lightning logging
+lightning_logs/
