@@ -1,0 +1,131 @@
+task:
+  _target_: soviamate.tasks.restoration.AudioCodecTask
+
+  data:
+    tokenizer: &tokenizer
+      _target_: soviamate.datas.tokenizer.Tokenizer
+      model_name: gpt-4o
+
+    trainset:
+      _target_: soviamate.datas.dataset.AudioCodecDataset
+      filepaths: /dataset/MSR-86K/Vietnamese/trainset.json
+      tokenizer: *tokenizer
+
+      transforms:
+        audio:
+          shifter:
+            _target_: soviamate.datas.transform.PitchShift
+            min_pitch_rate: 0.7
+            max_pitch_rate: 1.3
+            probability: 0.0
+
+        prompt:
+          trimmer:
+            _target_: soviamate.datas.transform.AudioTrimmer
+            percentage: 0.3
+            min_duration: 0.7
+            probability: 1.0
+
+          stretcher:
+            _target_: soviamate.datas.transform.TimeStretch
+            min_speed_rate: 0.5
+            max_speed_rate: 1.5
+            probability: 1.0
+
+    valset:
+      _target_: soviamate.datas.dataset.AudioCodecDataset
+      filepaths: /dataset/MSR-86K/Vietnamese/valset.json
+      tokenizer: *tokenizer
+
+    loader:
+      batch_size: 12
+      num_workers: 4
+      pin_memory: true
+
+  model:
+    d_model: &d_model 1024
+    window_size: &window_size 640
+
+    audio_encoder:
+      _target_: soviamate.modules.encoder.AudioEncoder
+      window_size: *window_size
+      num_layers: 24
+      d_model: *d_model
+      ffn_dim: 4096
+      num_heads: 8
+      kernel_size: 31
+      dropout: 0.1
+      contexts: [[1, 4], [2, 8], [4, 16], [8, 32], [16, 64]]
+
+    audio_decoder:
+      _target_: soviamate.modules.decoder.AudioDecoder
+      window_size: *window_size
+      num_layers: 12
+      d_model: *d_model
+      ffn_dim: 4096
+      num_heads: 8
+      kernel_size: 31 
+      dropout: 0.1
+      contexts: [[1, 4], [2, 8], [4, 16], [8, 32], [16, 64]]
+
+    audio_quantizer:
+      _target_: soviamate.modules.quantizer.FiniteScalarQuantization
+      input_dim: *d_model
+      levels: [17, 17, 17, 17, 17, 17]
+      num_codebooks: 1
+      noise_dropout: 0.5
+
+    discriminator:
+      _target_: soviamate.modules.discriminator.SpecUnetDisc
+      n_ffts: &n_ffts [512, 1024, 2048]
+      win_lengths: &win_lengths [320, 640, 1280]
+      hop_lengths: &hop_lengths [160, 320, 640]
+
+    audio_loss:
+      _target_: soviamate.modules.criterion.MultiResolutionSTFTLoss
+      n_ffts: *n_ffts
+      win_lengths: *win_lengths
+      hop_lengths: *hop_lengths
+
+    adv_loss:
+      _target_: soviamate.modules.criterion.LeastSquaresGANLoss
+
+  optim:
+    optimizer:
+      _target_: torch.optim.AdamW
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 1e-2
+      eps: 1e-9
+      fused: true
+
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ExponentialLR
+      gamma: 0.99
+
+callbacks:
+  lr:
+    _target_: lightning.pytorch.callbacks.LearningRateMonitor
+
+  cb:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    monitor: val_loss
+    save_top_k: 10
+    save_last: true
+    save_weights_only: true
+    filename: "{epoch}-{val_loss:.5f}"
+    every_n_epochs: 1
+
+loggers:
+  tb:
+    _target_: lightning.pytorch.loggers.TensorBoardLogger
+    save_dir: lightning_logs
+    name: asr-full-context
+    version: null
+    default_hp_metric: false
+
+trainer:
+  devices: -1
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_true
+  max_epochs: 10
