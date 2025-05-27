@@ -14,14 +14,14 @@
 
 """Loss Functions for different tasks"""
 
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as T
 
-from soviamate.layers.recognizer import Predictor, Joint
+from soviamate.layers.recognizer import Joint, Predictor
 from soviamate.utils.helper import make_padding_mask
 
 
@@ -49,92 +49,136 @@ class LeastSquaresGANLoss(nn.Module):
         return loss
 
 
-class MultiResolutionSTFTLoss(nn.Module):
-    r"""Multi-resolution STFT loss.
+class FeatureMatchingLoss(nn.Module):
+    """Feature Matching Loss for GANs.
+
+    This loss encourages the generator to produce samples that match the statistics
+    of real data in the feature space of the discriminator.
+    """
+
+    def forward(
+        self, fake_features: List[torch.Tensor], real_features: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Args:
+            fake_features (List[Tensor]): List of features from discriminator for fake samples
+            real_features (List[Tensor]): List of features from discriminator for real samples
+
+        Returns:
+            Tensor: Feature matching loss.
+        """
+
+        losses = 0.0
+        for fake_feat, real_feat in zip(fake_features, real_features):
+            loss = F.l1_loss(fake_feat, real_feat, reduction="none")
+            loss = loss / real_feat.abs().mean(dim=(1, 2), keepdim=True)
+            losses += loss.mean()
+
+        return losses / len(real_features)
+
+
+class MultiResolutionMelLoss(nn.Module):
+    """
+    Multi-Resolution Mel-Spectrogram Loss for audio reconstruction.
+
+    Combines both mel-spectrogram reconstruction loss and multi-scale spectral losses
+    as described in the research. Uses variable window sizes with proportional hop lengths
+    and mel bin sizes to better capture frequency information at multiple time-scales.
 
     Args:
-        n_ffts (List[int]): list of the number of Fourier bins.
-        win_lengths (List[int]): list of the window lengths.
-        hop_lengths (List[int]): list of the hop lengths.
+        sample_rate (int): Audio sample rate
+        window_lengths (List[int]): List of window lengths for STFT
+        hop_lengths (List[int], optional): List of hop lengths for STFT.
+        mel_bins (List[int], optional): List of mel bin sizes corresponding to each window length.
+        weighted_losses (List[int], optional): List of weights for each resolution loss.
     """
 
     def __init__(
-        self, n_ffts: List[int], win_lengths: List[int], hop_lengths: List[int]
-    ) -> None:
+        self,
+        sample_rate: int,
+        window_lengths: List[int],
+        hop_lengths: Optional[List[int]] = None,
+        mel_bins: Optional[List[int]] = None,
+        weighted_losses: Optional[List[int]] = None,
+    ):
         super().__init__()
 
-        self.spectrograms = nn.ModuleList()
-        for n_fft, win_length, hop_length in zip(n_ffts, win_lengths, hop_lengths):
-            self.spectrograms.append(
-                T.Spectrogram(n_fft, win_length, hop_length, power=1)
+        # Validate input configurations
+        assert len(window_lengths) > 0, "Must provide at least one window length"
+
+        # Ensure all lists have the same length
+        assert (
+            len(window_lengths)
+            == len(hop_lengths)
+            == len(mel_bins)
+            == len(weighted_losses)
+        ), "window_lengths, hop_lengths, mel_bins and weighted_losses must have the same length"
+
+        # Create mel spectrogram transforms for each resolution
+        self.sample_rate = sample_rate
+        self.window_lengths = window_lengths
+        self.hop_lengths = hop_lengths
+        self.mel_bins = mel_bins
+        self.weighted_losses = weighted_losses
+
+        self.mel_spectrograms = nn.ModuleList()
+        for window_length, hop_length, num_mels in zip(
+            window_lengths, hop_lengths, mel_bins
+        ):
+            self.mel_spectrograms.append(
+                T.MelSpectrogram(
+                    sample_rate=sample_rate,
+                    n_fft=window_length,
+                    win_length=window_length,
+                    hop_length=hop_length,
+                    n_mels=num_mels,
+                )
             )
 
     def forward(
         self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
     ) -> torch.Tensor:
-        r"""Compute the multi-resolution STFT loss.
+        """
+        Compute the multi-resolution mel-spectrogram loss.
 
         Args:
-            outputs (Tensor): waveform outputs, shape (B, 1, T).
-            targets (Tensor): waveform targets, shape (B, 1, T).
-            lengths (Tensor): lengths of the waveform targets, shape (B,).
+            outputs (Tensor): waveform outputs, shape (B, 1, T)
+            targets (Tensor): waveform targets, shape (B, 1, T)
+            lengths (Tensor): lengths of the waveform targets, shape (B,)
 
         Returns:
-            Tensor: multi-resolution STFT loss.
+            Tensor: Combined multi-resolution mel-spectrogram loss
         """
 
-        outputs = outputs.squeeze(1)
-        targets = targets.squeeze(1)
+        # Remove channel dimension if present
+        if outputs.dim() == 3:
+            outputs = outputs.squeeze(1)
+        if targets.dim() == 3:
+            targets = targets.squeeze(1)
 
+        # Create masks from lengths if provided
         masks = make_padding_mask(lengths)
-        masks = ~masks[:, None, :]
+        masks = (~masks[:, None, :]).float()
 
-        loss = 0.0
-        for spectrogram in self.spectrograms:
-            loss += self._forward_spectrogram(
-                spectrogram(outputs), spectrogram(targets), masks
-            )
+        # Calculate loss at each resolution
+        total_loss = 0.0
+        for i, mel_spectrogram in enumerate(self.mel_spectrograms):
+            # Compute mel spectrograms
+            mel_outputs = mel_spectrogram(outputs).clamp(min=1e-5).log()
+            mel_targets = mel_spectrogram(targets).clamp(min=1e-5).log()
 
-        loss = loss / len(self.spectrograms)
+            # Resize mask to match spectrogram dimensions
+            curr_masks = F.interpolate(masks, size=mel_outputs.size(2))
+            curr_masks = curr_masks.bool().expand_as(mel_outputs)
 
-        return loss
+            # Compute L1 loss between mel spectrograms
+            loss = F.l1_loss(mel_outputs, mel_targets, reduction="none")
+            loss = (loss * curr_masks).sum((1, 2)) / curr_masks.sum((1, 2))
 
-    def _forward_spectrogram(
-        self, spec_outs: torch.Tensor, spec_tgts: torch.Tensor, masks: torch.Tensor
-    ) -> torch.Tensor:
+            # Combine losses across resolutions
+            total_loss += 1.0 / self.weighted_losses[i] * loss.mean()
 
-        masks = F.interpolate(masks.float(), spec_tgts.size(2))
-        masks = masks.bool().expand_as(spec_tgts)
-
-        sc_loss = self._spectral_convergence_loss(spec_outs, spec_tgts, masks)
-        mag_loss = self._log_stft_magnitude_loss(spec_outs, spec_tgts, masks)
-
-        loss = sc_loss + mag_loss
-
-        return loss
-
-    def _spectral_convergence_loss(
-        self, xs: torch.Tensor, ys: torch.Tensor, masks: torch.Tensor
-    ) -> torch.Tensor:
-
-        numerator = ((ys - xs) * masks).norm(p="fro")
-        denominator = (ys * masks).norm(p="fro")
-
-        loss = numerator / (denominator + 1e-9)
-
-        return loss
-
-    def _log_stft_magnitude_loss(
-        self, xs: torch.Tensor, ys: torch.Tensor, masks: torch.Tensor
-    ) -> torch.Tensor:
-
-        xs = xs.add(1e-9).log()
-        ys = ys.add(1e-9).log()
-
-        loss = F.l1_loss(xs, ys, reduction="none")
-        loss = (loss * masks).sum() / masks.sum()
-
-        return loss
+        return total_loss
 
 
 class SequenceToSequenceLoss(nn.Module):
