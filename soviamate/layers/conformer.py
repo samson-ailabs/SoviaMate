@@ -18,8 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-__all__ = ["ConformerLayer"]
+EPS_NORM = 1e-2
 
 
 class _SelfAttentionModule(nn.Module):
@@ -33,8 +32,9 @@ class _SelfAttentionModule(nn.Module):
 
     def __init__(self, input_dim: int, num_heads: int, dropout: float) -> None:
         super().__init__()
+        self.num_heads = num_heads
 
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.layer_norm = nn.LayerNorm(input_dim, eps=EPS_NORM)
         self.attention = nn.MultiheadAttention(
             input_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -61,19 +61,21 @@ class _SelfAttentionModule(nn.Module):
             torch.Tensor: outputs, with shape `(B, T, D)`.
         """
 
-        q = self.layer_norm(inputs)
+        query = self.layer_norm(inputs)
 
-        k = v = torch.cat([contexts, q], dim=1)
-        cache = k[:, q.size(1) :, :]
+        key = value = torch.cat([contexts, query], dim=1)
+        cache = key[:, query.size(1) :, :]
 
         num_pads = attention_masks.size(1) - padding_masks.size(1)
         padding_masks = F.pad(padding_masks, (num_pads, 0), value=0)
 
-        padding_masks = padding_masks.type(q.dtype)
-        attention_masks = attention_masks.type(q.dtype)
-
         x, _ = self.attention(
-            q, k, v, key_padding_mask=padding_masks, attn_mask=attention_masks
+            query,
+            key,
+            value,
+            key_padding_mask=padding_masks,
+            attn_mask=attention_masks,
+            need_weights=False,
         )
 
         x = self.dropout(x)
@@ -98,16 +100,15 @@ class _ConvolutionModule(nn.Module):
 
         self.left_context = kernel_size - 1
 
-        self.layer_norm1 = nn.LayerNorm(input_dim)
-        self.pointwise_conv1 = nn.Conv1d(input_dim, 2 * input_dim, 1)
-        self.activation1 = nn.GLU(dim=1)
-
+        self.layer_norm1 = nn.InstanceNorm1d(input_dim, eps=EPS_NORM)
+        self.pointwise_conv1 = nn.Conv1d(input_dim, input_dim, 1)
+        self.activation1 = nn.GELU()
         self.depthwise_conv = nn.Conv1d(
             input_dim, input_dim, kernel_size, groups=input_dim
         )
 
-        self.layer_norm2 = nn.LayerNorm(input_dim)
-        self.activation2 = nn.SiLU()
+        self.layer_norm2 = nn.InstanceNorm1d(input_dim, eps=EPS_NORM)
+        self.activation2 = nn.GELU()
         self.pointwise_conv2 = nn.Conv1d(input_dim, input_dim, 1)
 
         self.dropout = nn.Dropout(dropout)
@@ -127,9 +128,9 @@ class _ConvolutionModule(nn.Module):
             torch.Tensor: outputs, with shape `(B, T, D)`.
         """
 
-        x = self.layer_norm1(inputs)
-        x = x.transpose(1, 2)
+        x = inputs.transpose(1, 2)
 
+        x = self.layer_norm1(x)
         x = self.pointwise_conv1(x)
         x = self.activation1(x)
 
@@ -138,13 +139,11 @@ class _ConvolutionModule(nn.Module):
 
         x = torch.cat([contexts, x], dim=2)
         cache = x[:, :, -self.left_context :]
+
         x = self.depthwise_conv(x)
-
-        x = x.transpose(1, 2)
         x = self.layer_norm2(x)
-        x = x.transpose(1, 2)
-
         x = self.activation2(x)
+
         x = self.pointwise_conv2(x)
         x = self.dropout(x)
 
@@ -166,9 +165,9 @@ class _FeedForwardModule(nn.Module):
         super().__init__()
 
         self.sequential = nn.Sequential(
-            nn.LayerNorm(input_dim),
+            nn.LayerNorm(input_dim, eps=EPS_NORM),
             nn.Linear(input_dim, hidden_dim),
-            nn.SiLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, input_dim),
             nn.Dropout(dropout),
@@ -210,7 +209,7 @@ class ConformerLayer(nn.Module):
         self.attn_module = _SelfAttentionModule(input_dim, num_heads, dropout)
         self.conv_module = _ConvolutionModule(input_dim, kernel_size, dropout)
         self.ffn2_module = _FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.layer_norm = nn.LayerNorm(input_dim, eps=EPS_NORM)
 
     def forward(
         self,
