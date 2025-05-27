@@ -20,6 +20,9 @@ packages = [{include = "soviamate"}]
 
 [tool.poetry.group.devel.dependencies]
 ipython = "^8.31.0"
+huggingface-hub = "^0.29.3"
+tensorboard = "^2.19.0"
+matplotlib = "^3.10.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
