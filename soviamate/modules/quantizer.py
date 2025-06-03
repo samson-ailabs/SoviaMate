@@ -58,11 +58,19 @@ class FiniteScalarQuantization(nn.Module):
 
     @torch.autocast(device_type="cuda", enabled=False)
     def _quantize_vectors(self, x: torch.Tensor) -> torch.Tensor:
-        qx = self._symmetry_preserving_bound(x.float())
+        x = torch.tanh(x.type(torch.float))
+        noise = (torch.rand_like(x) - 0.5) * 2 / (self.levels - 1)
+
+        qx = self._inverse_scale_and_shift(
+            self._straight_through_gradient(self._scale_and_shift(x))
+        )
 
         if self.training:
-            mask = torch.bernoulli(torch.full_like(qx, self.noise_dropout))
-            qx = torch.where(mask.bool(), qx + torch.rand_like(qx) - 0.5, qx)
+            mask = self._generate_random_mask(x)
+            qx = torch.where(mask, x, qx)
+
+            mask = self._generate_random_mask(x)
+            qx = torch.where(mask, qx, x + noise)
 
         return qx
 
@@ -132,10 +140,21 @@ class FiniteScalarQuantization(nn.Module):
 
         return outputs
 
-    def _symmetry_preserving_bound(self, z: torch.Tensor):
-        bracket = ((self.levels - 1) * (z.tanh() + 1) / 2.0) + 0.5
-        bracket = bracket + (bracket.floor() - bracket).detach()
-        return 2.0 / (self.levels - 1) * bracket - 1.0
+    def _bound(self, z: torch.Tensor):
+        half_l = (self.levels - 1) / 2
+        offset = torch.where(self.levels % 2 == 0, 0.5, 0.0)
+        shift = (offset / half_l).atanh()
+        bounded_z = (z + shift).tanh() * half_l - offset
+        half_width = self.levels // 2
+        return self._straight_through_gradient(bounded_z) / half_width
+
+    def _straight_through_gradient(self, z: torch.Tensor):
+        return z + (z.round() - z).detach()
+
+    def _generate_random_mask(self, x: torch.Tensor):
+        mask = torch.full((x.size(0),), self.noise_dropout, device=x.device)
+        mask = torch.bernoulli(mask)[:, None, None, None].bool().expand_as(x)
+        return mask
 
     def _scale_and_shift(self, z: torch.Tensor):
         return (z + 1) * (self.levels - 1) / 2
