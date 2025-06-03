@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""“Audio Neural Codec Models for learning audio discrete tokens”"""
+"""Audio Neural Codec Models for learning audio discrete tokens"""
 
 import itertools
-from typing import Tuple
+from typing import Tuple, Optional
 
 import lightning as L
 from hydra.utils import instantiate
@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-SEGMENT_SIZE = 40960
+SEGMENT_SIZE = 8192
 
 
 class AudioCodecTask(L.LightningModule):
@@ -44,13 +44,14 @@ class AudioCodecTask(L.LightningModule):
         self.save_hyperparameters("data", "model", "optim")
 
         self.audio_encoder = instantiate(self.hparams.model.audio_encoder)
-        self.audio_decoder = instantiate(self.hparams.model.audio_decoder)
         self.audio_quantizer = instantiate(self.hparams.model.audio_quantizer)
+        self.audio_decoder = instantiate(self.hparams.model.audio_decoder)
 
         self.discriminator = instantiate(self.hparams.model.discriminator)
 
         self.audio_loss = instantiate(self.hparams.model.audio_loss)
         self.adv_loss = instantiate(self.hparams.model.adv_loss)
+        self.fmap_loss = instantiate(self.hparams.model.fmap_loss)
 
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
@@ -82,9 +83,9 @@ class AudioCodecTask(L.LightningModule):
         self,
         input_audios: torch.Tensor,
         input_lengths: torch.Tensor,
-        target_lengths: torch.Tensor = None,
+        target_lengths: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
+
         encoder_outputs, encoder_lengths = self.audio_encoder(
             input_audios, input_lengths
         )
@@ -99,9 +100,8 @@ class AudioCodecTask(L.LightningModule):
             decoder_outputs = F.pad(
                 decoder_outputs,
                 (0, 0, 0, target_lengths.max() - decoder_outputs.size(1)),
-                value=0,
             )
-            decoder_lengths = target_lengths
+            decoder_lengths = target_lengths.clone()
 
         return decoder_outputs, decoder_lengths
 
@@ -123,8 +123,8 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs = self.discriminator(outputs.detach())
-        targets = self.discriminator(targets.detach())
+        outputs, _ = self.discriminator(outputs.detach())
+        targets, _ = self.discriminator(targets.detach())
 
         disc_loss = self.adv_loss(outputs, targets)
         self.manual_backward(disc_loss)
@@ -142,34 +142,38 @@ class AudioCodecTask(L.LightningModule):
 
         audio_loss = self.audio_loss(output_audios, target_audios, target_lengths)
 
-        outputs, _ = self._get_random_segments(
+        outputs, targets = self._get_random_segments(
             output_audios, target_audios, target_lengths
         )
 
-        outputs = self.discriminator(outputs)
-        gen_loss = self.adv_loss(outputs)
+        outputs, _ = self.discriminator(outputs)
+        # _, real_features = self.discriminator(targets)
 
-        loss = 2.0 * audio_loss + gen_loss
-        self.manual_backward(loss)
+        gen_loss = self.adv_loss(outputs)
+        # fmap_loss = self.fmap_loss(fake_features, real_features)
+
+        train_loss = 2.0 * audio_loss + 1.0 * gen_loss
+        self.manual_backward(train_loss)
 
         gen_optim.step()
         gen_optim.zero_grad()
 
-        if self.trainer.is_last_batch:
-            gen_sched.step()
+        gen_sched.step()
 
         self.untoggle_optimizer(gen_optim)
 
+        # Log losses
         self.log_dict(
             {
                 "train_audio_loss": audio_loss,
                 "train_gen_loss": gen_loss,
                 "train_disc_loss": disc_loss,
+                # "train_fmap_loss": fmap_loss,
             },
             sync_dist=True,
         )
 
-        self.log("train_loss", loss, sync_dist=True, prog_bar=True)
+        self.log("train_loss", train_loss, sync_dist=True, prog_bar=True)
 
     def validation_step(self, batch: Tuple[torch.Tensor, ...]):
         input_audios, input_lengths, _, _, target_audios, target_lengths, _, _ = batch
@@ -184,20 +188,24 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs = self.discriminator(outputs)
-        gen_loss = self.adv_loss(outputs)
+        outputs, _ = self.discriminator(outputs)
+        # _, real_features = self.discriminator(targets)
 
-        loss = 2.0 * audio_loss + gen_loss
+        gen_loss = self.adv_loss(outputs)
+        # fmap_loss = self.fmap_loss(fake_features, real_features)
+
+        val_loss = 2.0 * audio_loss + 1.0 * gen_loss
 
         self.log_dict(
             {
                 "val_audio_loss": audio_loss,
                 "val_gen_loss": gen_loss,
+                # "val_fmap_loss": fmap_loss,
             },
             sync_dist=True,
         )
 
-        self.log("val_loss", loss, sync_dist=True, prog_bar=True)
+        self.log("val_loss", val_loss, sync_dist=True, prog_bar=True)
 
     def _get_random_segments(
         self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
@@ -228,14 +236,27 @@ class AudioCodecTask(L.LightningModule):
     def configure_optimizers(self):
         disc_params = self.discriminator.parameters()
 
-        disc_optim = instantiate(self.hparams.optim.optimizer, params=disc_params)
-        disc_sched = instantiate(self.hparams.optim.scheduler, optimizer=disc_optim)
-
-        gen_params = itertools.chain(
-            self.audio_encoder.parameters(), self.audio_decoder.parameters()
+        disc_optim = instantiate(
+            self.hparams.optim.discriminator.optimizer, params=disc_params
+        )
+        disc_sched = instantiate(
+            self.hparams.optim.discriminator.scheduler, optimizer=disc_optim
         )
 
-        gen_optim = instantiate(self.hparams.optim.optimizer, params=gen_params)
-        gen_sched = instantiate(self.hparams.optim.scheduler, optimizer=gen_optim)
+        gen_params = itertools.chain(
+            self.audio_encoder.parameters(),
+            self.audio_quantizer.parameters(),
+            self.audio_decoder.parameters(),
+        )
 
-        return [disc_optim, gen_optim], [disc_sched, gen_sched]
+        gen_optim = instantiate(
+            self.hparams.optim.generator.optimizer, params=gen_params
+        )
+        gen_sched = instantiate(
+            self.hparams.optim.generator.scheduler, optimizer=gen_optim
+        )
+
+        return [disc_optim, gen_optim], [
+            {"scheduler": disc_sched, "interval": "epoch"},
+            {"scheduler": gen_sched, "interval": "step"},
+        ]
