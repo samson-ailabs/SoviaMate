@@ -107,6 +107,10 @@ def make_attention_mask(
             the corresponding input value will be ignored.
     """
 
+    assert (
+        left_context % chunk_size == 0
+    ), "left_context must be divisible by chunk_size"
+
     device = lengths.device
     dtype = lengths.dtype
 
