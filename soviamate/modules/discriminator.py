@@ -14,14 +14,15 @@
 
 """Discriminators for adversarial training"""
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as T
+from torch.nn.utils.parametrizations import weight_norm
 
-LEAKY_SLOPE = 0.2
+LRELU_SLOPE = 0.2
 
 
 class _ResBlockDown(nn.Module):
@@ -31,6 +32,7 @@ class _ResBlockDown(nn.Module):
         ), "Output channels must be twice the input channels"
 
         super().__init__()
+        self.leaky_relu = nn.LeakyReLU(negative_slope=LRELU_SLOPE)
 
         self.skip_pool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
         self.skip_conv = nn.Conv2d(
@@ -71,13 +73,13 @@ class _ResBlockDown(nn.Module):
         return out
 
     def _residual_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.leaky_relu(x, LEAKY_SLOPE)
+        x = self.leaky_relu(x)
 
         x1 = self.res_conv(x)
         x2 = self.res_pool(x)
 
         x = x1 + x2.repeat_interleave(2, dim=1)
-        x = F.leaky_relu(x, LEAKY_SLOPE)
+        x = self.leaky_relu(x)
 
         out = self.res_proj(x)
 
@@ -97,7 +99,12 @@ class _ResBlockUp(nn.Module):
 
         self.res_upsm = nn.Upsample(scale_factor=2, mode="nearest")
         self.res_conv = nn.ConvTranspose2d(
-            in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,
         )
         self.res_proj = nn.Conv2d(
             out_channels, out_channels, kernel_size=3, stride=1, padding=1
@@ -126,13 +133,13 @@ class _ResBlockUp(nn.Module):
         return out
 
     def _residual_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.leaky_relu(x, LEAKY_SLOPE)
+        x = self.leaky_relu(x)
 
         x1 = self.res_conv(x)
         x2 = self.res_upsm(x)
 
         x = x1 + x2[:, :: self.factor, :, :]
-        x = F.leaky_relu(x, LEAKY_SLOPE)
+        x = self.leaky_relu(x)
 
         out = self.res_proj(x)
 
@@ -168,25 +175,22 @@ class SpecUnetDisc(nn.Module):
                 )
             )
 
-        self.conv1 = nn.Conv2d(2, 32, kernel_size=3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(2, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 1, kernel_size=3, padding=1)
 
-        self.down1 = _ResBlockDown(32, 64)
-        self.down2 = _ResBlockDown(64, 128)
-        self.down3 = _ResBlockDown(128, 256)
-        self.down4 = _ResBlockDown(256, 512)
-        self.down5 = _ResBlockDown(512, 1024)
+        self.down1 = _ResBlockDown(64, 128)
+        self.down2 = _ResBlockDown(128, 256)
+        self.down3 = _ResBlockDown(256, 512)
+        self.down4 = _ResBlockDown(512, 1024)
 
         self.ccat1 = nn.Conv2d(1024, 512, kernel_size=1, stride=1)
         self.ccat2 = nn.Conv2d(512, 256, kernel_size=1, stride=1)
         self.ccat3 = nn.Conv2d(256, 128, kernel_size=1, stride=1)
-        self.ccat4 = nn.Conv2d(128, 64, kernel_size=1, stride=1)
 
         self.upsm1 = _ResBlockUp(1024, 512)
         self.upsm2 = _ResBlockUp(512, 256)
         self.upsm3 = _ResBlockUp(256, 128)
         self.upsm4 = _ResBlockUp(128, 64)
-        self.upsm5 = _ResBlockUp(64, 32)
 
     def _forward_spectrogram(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.view_as_real(x)
@@ -199,21 +203,18 @@ class SpecUnetDisc(nn.Module):
         x2 = self.down2(x1)
         x3 = self.down3(x2)
         x4 = self.down4(x3)
-        x5 = self.down5(x4)
 
-        y0 = x5
+        y0 = x4
 
         y1 = self.upsm1(y0)
-        y1 = self.ccat1(torch.cat((x4, y1), dim=1))
+        y1 = self.ccat1(torch.cat((x3, y1), dim=1))
         y2 = self.upsm2(y1)
-        y2 = self.ccat2(torch.cat((x3, y2), dim=1))
+        y2 = self.ccat2(torch.cat((x2, y2), dim=1))
         y3 = self.upsm3(y2)
-        y3 = self.ccat3(torch.cat((x2, y3), dim=1))
+        y3 = self.ccat3(torch.cat((x1, y3), dim=1))
         y4 = self.upsm4(y3)
-        y4 = self.ccat4(torch.cat((x1, y4), dim=1))
-        y5 = self.upsm5(y4)
 
-        x = self.conv2(y5)
+        x = self.conv2(y4)
         x = x.flatten(start_dim=1)
 
         return x
@@ -236,3 +237,71 @@ class SpecUnetDisc(nn.Module):
         outs = torch.cat(outs, dim=1)
 
         return outs
+
+
+class RSD(nn.Module):
+    def __init__(self, n_fft: int, win_length: int, hop_length: int):
+        super().__init__()
+        self.spectrogram = T.Spectrogram(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=1
+        )
+        self.layers = nn.ModuleList(
+            [
+                weight_norm(nn.Conv2d(1, 64, (3, 9), (1, 1), (1, 4))),
+                weight_norm(nn.Conv2d(64, 128, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(128, 256, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(256, 512, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(512, 1024, (3, 3), (1, 1), (1, 1))),
+            ]
+        )
+        self.proj = weight_norm(nn.Conv2d(1024, 1, 3, 1, 1))
+
+    def forward(self, xs: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        r"""Forward pass of the discriminator.
+        Args:
+            xs (Tensor): waveform input tensor, shape (B, 1, T)
+        Returns:
+            Tuple[Tensor, List[Tensor]]: latent output tensor, shape (B, T')
+        """
+
+        xs = self.spectrogram(xs)
+        fmaps = []
+
+        for layer in self.layers:
+            xs = F.leaky_relu(layer(xs), LRELU_SLOPE)
+            fmaps.append(xs)
+
+        xs = self.proj(xs)
+        fmaps.append(xs)
+
+        xs = torch.flatten(xs, 1, -1)
+
+        return xs, fmaps
+
+
+class MultiResolutionDiscriminator(nn.Module):
+    r"""Multi-resolution discriminator for adversarial training.
+    Args:
+        resolutions (List[List[int]]): list of resolutions for each discriminator
+    """
+
+    def __init__(self, resolutions: List[List[int]]):
+        super().__init__()
+        self.discriminators = nn.ModuleList([RSD(*rst) for rst in resolutions])
+
+    def forward(self, xs: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        r"""Forward pass of the multi-resolution discriminator.
+        Args:
+            xs (Tensor): waveform input tensor, shape (B, 1, T)
+
+        Returns:
+            Tuple[Tensor, List[Tensor]]: latent output tensor, shape (B, T')
+        """
+
+        outputs = [disc(xs) for disc in self.discriminators]
+        disc_outputs, fmap_outputs = map(list, zip(*outputs))
+
+        disc_outputs = torch.cat(disc_outputs, dim=1)
+        fmap_outputs = [feat for outs in fmap_outputs for feat in outs]
+
+        return disc_outputs, fmap_outputs
