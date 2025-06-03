@@ -19,10 +19,11 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
+import torchaudio.transforms as TAudio
 from torch.nn import functional as F
-from torchaudio import transforms as T
 
 from soviamate.layers.conformer import ConformerLayer
+from soviamate.layers.processor import SpectrogramProcessor
 from soviamate.layers.redimnet import ASTP, Block1D, Block2D, Reshape, WeightSum
 from soviamate.utils.helper import make_attention_mask, make_padding_mask
 
@@ -73,9 +74,8 @@ class AudioEncoder(nn.Module):
         self.kernel_size = kernel_size
         self.attn_contexts = contexts
 
-        self.linear = nn.Sequential(
-            nn.Linear(window_size, d_model * 2, bias=False),
-            nn.Linear(d_model * 2, d_model, bias=True),
+        self.specgram = SpectrogramProcessor(
+            window_size=window_size, output_dim=d_model, hop_length_ratio=4
         )
 
         self.layers = nn.ModuleList(
@@ -100,11 +100,12 @@ class AudioEncoder(nn.Module):
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        xs, x_lens = self._time_reduction(waveforms, lengths)
-        xs = self.linear(xs)
+        batch_size, device = waveforms.size(0), waveforms.device
 
         chunk_size, left_context = random.choice(self.attn_contexts)
-        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
+        zero_caches = self._initiate_states(batch_size, left_context, device)
+
+        xs, x_lens = self.specgram(waveforms, lengths)
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
@@ -147,8 +148,7 @@ class AudioEncoder(nn.Module):
             [valid_segment_length] * batch_size, device=segments.device
         )
 
-        xs, x_lens = self._time_reduction(segments, lengths)
-        xs = self.linear(xs)
+        xs, x_lens = self.specgram(segments, lengths)
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, self.chunk_size, self.left_context)
@@ -201,34 +201,6 @@ class AudioEncoder(nn.Module):
 
         return [[conv_cache, attn_cache] for _ in range(len(self.layers))]
 
-    def _time_reduction(
-        self, xs: torch.Tensor, x_lens: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Reduce the time dimension of the audio signal.
-
-        Args:
-            xs (Tensor): input tensor with shape `(batch, time, channel)`.
-            x_lens (Tensor): length of the input tensor.
-
-        Returns:
-            Tuple[Tensor, Tensor]:
-                The reduced input tensor and its length.
-        """
-
-        b, t, d = xs.shape
-        n = t + (self.window_size - t % self.window_size) % self.window_size
-
-        new_t = n // self.window_size
-        new_d = d * self.window_size
-
-        xs = F.pad(xs, (0, 0, 0, n - t))
-        xs = xs.reshape(b, new_t, new_d).contiguous()
-
-        x_lens = torch.div(x_lens - 1, self.window_size, rounding_mode="trunc")
-        x_lens = (x_lens + 1).type(torch.long)
-
-        return xs, x_lens
-
 
 class SpeakerEncoder(nn.Module):
     r"""Speaker Encoder model for extracting speaker embeddings from speech signals.
@@ -274,7 +246,7 @@ class SpeakerEncoder(nn.Module):
         self.num_frequencies = num_frequencies
         self.volumes = num_channels * num_frequencies
 
-        self.melspec = T.MelSpectrogram(
+        self.melspec = TAudio.MelSpectrogram(
             sample_rate=sample_rate,
             n_fft=n_fft,
             win_length=win_length,

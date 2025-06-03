@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
+from soviamate.layers.processor import InverseSpectrogramProcessor
 from soviamate.utils.helper import make_padding_mask, make_attention_mask
 
 
@@ -77,9 +78,8 @@ class AudioDecoder(nn.Module):
             ]
         )
 
-        self.linear = nn.Sequential(
-            nn.Linear(d_model, 2 * d_model, bias=True),
-            nn.Linear(2 * d_model, window_size, bias=False),
+        self.inverse_specgram = InverseSpectrogramProcessor(
+            window_size=window_size, input_dim=d_model, hop_length_ratio=4
         )
 
     def forward(self, embeddings: torch.Tensor, lengths: torch.Tensor):
@@ -109,8 +109,7 @@ class AudioDecoder(nn.Module):
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
             xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
 
-        xs = self.linear(xs).flatten(1, 2).unsqueeze(-1)
-        x_lens = (x_lens * self.window_size).type(torch.long)
+        xs, x_lens = self.inverse_specgram(xs, x_lens)
 
         return xs, x_lens
 
@@ -153,7 +152,7 @@ class AudioDecoder(nn.Module):
             )
             new_caches.append([conv_cache, attn_cache])
 
-        xs = self.linear(xs).flatten(1, 2).unsqueeze(-1)
+        xs, _ = self.inverse_specgram(xs, x_lens)
 
         return xs, new_caches
 
