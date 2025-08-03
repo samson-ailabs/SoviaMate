@@ -91,6 +91,7 @@ class _ResBlockUp(nn.Module):
 
         super().__init__()
         self.factor = in_channels // out_channels
+        self.leaky_relu = nn.LeakyReLU(negative_slope=LRELU_SLOPE)
 
         self.skip_upsm = nn.Upsample(scale_factor=2, mode="nearest")
         self.skip_conv = nn.Conv2d(
@@ -237,71 +238,3 @@ class SpecUnetDisc(nn.Module):
         outs = torch.cat(outs, dim=1)
 
         return outs
-
-
-class RSD(nn.Module):
-    def __init__(self, n_fft: int, win_length: int, hop_length: int):
-        super().__init__()
-        self.spectrogram = T.Spectrogram(
-            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=1
-        )
-        self.layers = nn.ModuleList(
-            [
-                weight_norm(nn.Conv2d(1, 64, (3, 9), (1, 1), (1, 4))),
-                weight_norm(nn.Conv2d(64, 128, (3, 9), (1, 2), (1, 4))),
-                weight_norm(nn.Conv2d(128, 256, (3, 9), (1, 2), (1, 4))),
-                weight_norm(nn.Conv2d(256, 512, (3, 9), (1, 2), (1, 4))),
-                weight_norm(nn.Conv2d(512, 1024, (3, 3), (1, 1), (1, 1))),
-            ]
-        )
-        self.proj = weight_norm(nn.Conv2d(1024, 1, 3, 1, 1))
-
-    def forward(self, xs: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        r"""Forward pass of the discriminator.
-        Args:
-            xs (Tensor): waveform input tensor, shape (B, 1, T)
-        Returns:
-            Tuple[Tensor, List[Tensor]]: latent output tensor, shape (B, T')
-        """
-
-        xs = self.spectrogram(xs)
-        fmaps = []
-
-        for layer in self.layers:
-            xs = F.leaky_relu(layer(xs), LRELU_SLOPE)
-            fmaps.append(xs)
-
-        xs = self.proj(xs)
-        fmaps.append(xs)
-
-        xs = torch.flatten(xs, 1, -1)
-
-        return xs, fmaps
-
-
-class MultiResolutionDiscriminator(nn.Module):
-    r"""Multi-resolution discriminator for adversarial training.
-    Args:
-        resolutions (List[List[int]]): list of resolutions for each discriminator
-    """
-
-    def __init__(self, resolutions: List[List[int]]):
-        super().__init__()
-        self.discriminators = nn.ModuleList([RSD(*rst) for rst in resolutions])
-
-    def forward(self, xs: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        r"""Forward pass of the multi-resolution discriminator.
-        Args:
-            xs (Tensor): waveform input tensor, shape (B, 1, T)
-
-        Returns:
-            Tuple[Tensor, List[Tensor]]: latent output tensor, shape (B, T')
-        """
-
-        outputs = [disc(xs) for disc in self.discriminators]
-        disc_outputs, fmap_outputs = map(list, zip(*outputs))
-
-        disc_outputs = torch.cat(disc_outputs, dim=1)
-        fmap_outputs = [feat for outs in fmap_outputs for feat in outs]
-
-        return disc_outputs, fmap_outputs

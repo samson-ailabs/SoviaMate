@@ -15,7 +15,7 @@
 """Audio Neural Codec Models for learning audio discrete tokens"""
 
 import itertools
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import lightning as L
 from hydra.utils import instantiate
@@ -123,8 +123,8 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs, _ = self.discriminator(outputs.detach())
-        targets, _ = self.discriminator(targets.detach())
+        outputs = self.discriminator(outputs.detach())
+        targets = self.discriminator(targets.detach())
 
         disc_loss = self.adv_loss(outputs, targets)
         self.manual_backward(disc_loss)
@@ -142,15 +142,12 @@ class AudioCodecTask(L.LightningModule):
 
         audio_loss = self.audio_loss(output_audios, target_audios, target_lengths)
 
-        outputs, targets = self._get_random_segments(
+        outputs, _ = self._get_random_segments(
             output_audios, target_audios, target_lengths
         )
 
-        outputs, _ = self.discriminator(outputs)
-        # _, real_features = self.discriminator(targets)
-
+        outputs = self.discriminator(outputs)
         gen_loss = self.adv_loss(outputs)
-        # fmap_loss = self.fmap_loss(fake_features, real_features)
 
         train_loss = 2.0 * audio_loss + 1.0 * gen_loss
         self.manual_backward(train_loss)
@@ -168,7 +165,6 @@ class AudioCodecTask(L.LightningModule):
                 "train_audio_loss": audio_loss,
                 "train_gen_loss": gen_loss,
                 "train_disc_loss": disc_loss,
-                # "train_fmap_loss": fmap_loss,
             },
             sync_dist=True,
         )
@@ -188,11 +184,8 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs, _ = self.discriminator(outputs)
-        # _, real_features = self.discriminator(targets)
-
+        outputs = self.discriminator(outputs)
         gen_loss = self.adv_loss(outputs)
-        # fmap_loss = self.fmap_loss(fake_features, real_features)
 
         val_loss = 2.0 * audio_loss + 1.0 * gen_loss
 
@@ -200,7 +193,6 @@ class AudioCodecTask(L.LightningModule):
             {
                 "val_audio_loss": audio_loss,
                 "val_gen_loss": gen_loss,
-                # "val_fmap_loss": fmap_loss,
             },
             sync_dist=True,
         )
