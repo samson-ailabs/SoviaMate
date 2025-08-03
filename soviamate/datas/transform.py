@@ -134,9 +134,11 @@ class AudioTrimmer:
         duration = max(self.min_duration, duration)
 
         max_length = int(duration * sample_rate)
+        max_length = min(max_length, waveform.size(1))
 
-        start = random.randint(0, waveform.size(1) - max_length)
-        waveform = waveform[:, start : start + max_length]
+        if max_length > 0:
+            start = random.randint(0, waveform.size(1) - max_length)
+            waveform = waveform[:, start : start + max_length]
 
         return waveform
 

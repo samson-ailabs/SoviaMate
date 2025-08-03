@@ -65,9 +65,11 @@ class AudioCodecDataset(Dataset):
         input_audio, input_sample_rate = torchaudio.load(sample["audio_filepath"])
         target_audio, target_sample_rate = torchaudio.load(sample["target_filepath"])
 
-        assert (
-            input_sample_rate == target_sample_rate
-        ), f"Sample rates mismatch: {input_sample_rate} != {target_sample_rate}"
+        if input_sample_rate != target_sample_rate:
+            input_audio = torchaudio.functional.resample(
+                input_audio, input_sample_rate, target_sample_rate
+            )
+            input_sample_rate = target_sample_rate
 
         if hasattr(self, "audio_transforms"):
             for transform in self.audio_transforms:
