@@ -175,3 +175,6 @@ outputs/
 
 # Lightning logging
 lightning_logs/
+
+# Data files and training datasets
+data/
