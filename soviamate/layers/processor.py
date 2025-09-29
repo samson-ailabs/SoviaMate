@@ -38,13 +38,13 @@ class SpectrogramProcessor(nn.Module):
     ):
         super().__init__()
 
-        assert (
-            window_size % hop_length_ratio == 0
-        ), "window_size must be divisible by hop_length_ratio."
+        assert window_size % hop_length_ratio == 0, (
+            "window_size must be divisible by hop_length_ratio."
+        )
 
-        assert (
-            hop_length_ratio > 1
-        ), "hop_length_ratio must be greater than 1 for frame stacking."
+        assert hop_length_ratio > 1, (
+            "hop_length_ratio must be greater than 1 for frame stacking."
+        )
 
         self.window_size = window_size
         self.hop_length_ratio = hop_length_ratio
@@ -128,20 +128,17 @@ class InverseSpectrogramProcessor(nn.Module):
     """
 
     def __init__(
-        self,
-        window_size: int,
-        hop_length_ratio: int = 4,
-        input_dim: int = None,
+        self, window_size: int, hop_length_ratio: int = 4, input_dim: int = None
     ):
         super().__init__()
 
-        assert (
-            window_size % hop_length_ratio == 0
-        ), "window_size must be divisible by hop_length_ratio."
+        assert window_size % hop_length_ratio == 0, (
+            "window_size must be divisible by hop_length_ratio."
+        )
 
-        assert (
-            hop_length_ratio > 1
-        ), "hop_length_ratio must be greater than 1 for frame stacking."
+        assert hop_length_ratio > 1, (
+            "hop_length_ratio must be greater than 1 for frame stacking."
+        )
 
         self.window_size = window_size
         self.hop_length_ratio = hop_length_ratio
@@ -232,9 +229,9 @@ class AudioChunkProcessor(nn.Module):
         super().__init__()
 
         assert window_size > 0, "window_size must be positive"
-        assert (
-            window_size % hop_length_ratio == 0
-        ), "window_size must be divisible by hop_length_ratio."
+        assert window_size % hop_length_ratio == 0, (
+            "window_size must be divisible by hop_length_ratio."
+        )
         assert hop_length_ratio > 1, "hop_length_ratio must be greater than 1."
         assert frames_per_chunk > 0, "frames_per_chunk must be positive"
 

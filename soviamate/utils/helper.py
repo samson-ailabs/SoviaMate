@@ -83,7 +83,7 @@ def make_padding_mask(lengths: torch.Tensor) -> torch.Tensor:
     dtype = lengths.dtype
 
     batch_size = lengths.size(0)
-    max_length = int(lengths.max())
+    max_length = lengths.max()
 
     mask = torch.arange(max_length, device=device, dtype=dtype)
     mask = mask.expand(batch_size, max_length) >= lengths.unsqueeze(1)
@@ -115,7 +115,7 @@ def make_attention_mask(
     dtype = lengths.dtype
 
     offset = left_context // chunk_size
-    max_length = int(lengths.max())
+    max_length = lengths.max()
 
     row = torch.arange(max_length, device=device, dtype=dtype)
     row = row.div(chunk_size, rounding_mode="trunc")

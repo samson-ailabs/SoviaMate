@@ -3,8 +3,11 @@ task:
 
   data:
     tokenizer: &tokenizer
-      _target_: soviamate.datas.tokenizer.Tokenizer
-      model_name: gpt-4o
+      _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
+      model_path: models/asr_tokenizer_8k.model
+      vocab_size: 8000
+      character_coverage: 1.0
+      model_type: bpe
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
@@ -38,19 +41,20 @@ task:
       tokenizer: *tokenizer
 
     loader:
-      batch_size: 8
-      num_workers: 4
+      batch_size: 16
+      num_workers: 8
       pin_memory: true
 
   model:
     d_model: &d_model 1024
     window_size: &window_size 640
     contexts: &contexts [[4, 16], [8, 32], [16, 64]]
+    vocab_size: &vocab_size 8000
 
     audio_encoder:
       _target_: soviamate.modules.encoder.AudioEncoder
       window_size: *window_size
-      num_layers: 16
+      num_layers: 8
       d_model: *d_model
       ffn_dim: 4096
       num_heads: 8
@@ -58,10 +62,37 @@ task:
       dropout: 0.1
       contexts: *contexts
 
+    # # ASR Module: Text decoder for transcription before quantization
+    # text_decoder:
+    #   _target_: soviamate.modules.decoder.TextDecoder
+    #   input_dim: *d_model
+    #   hidden_dim: 2048
+    #   output_dim: *vocab_size
+    #   dropout: 0.1
+
+    # # Speaker adaptation components
+    # speaker_encoder:
+    #   _target_: soviamate.modules.encoder.SpeakerEncoder
+    #   sample_rate: 16000
+    #   n_fft: 1024
+    #   win_length: 1024
+    #   hop_length: 256
+    #   num_channels: 64
+    #   num_frequencies: 80
+    #   pooling_dim: 128
+    #   output_dim: *d_model
+
+    # speaker_adapter:
+    #   _target_: soviamate.modules.adapter.SpeakerAdapter
+    #   input_dim: *d_model
+    #   hidden_dim: 2048
+    #   num_heads: 8
+    #   dropout: 0.1
+
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
       window_size: *window_size
-      num_layers: 8
+      num_layers: 4
       d_model: *d_model
       ffn_dim: 4096
       num_heads: 8
@@ -77,50 +108,75 @@ task:
       noise_dropout: 0.5
 
     discriminator:
-      _target_: soviamate.modules.discriminator.SpecUnetDisc
-      n_ffts: [512, 1024, 2048]
-      win_lengths: [256, 512, 1024]
-      hop_lengths: [128, 256, 512]
+      _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminator
+      n_ffts: [128, 256, 512, 1024, 2048, 4096]
+      hop_lengths: [64, 128, 256, 512, 1024, 2048]
+      win_lengths: [128, 256, 512, 1024, 2048, 4096]
 
     audio_loss:
-      _target_: soviamate.modules.criterion.MultiResolutionMelLoss
+      _target_: soviamate.modules.criterion.MelSpectralEnergyLoss
       sample_rate: 16000
-      window_lengths: [32, 64, 128, 256, 512, 1024, 2048]
-      hop_lengths: [8, 16, 32, 64, 128, 256, 512]
-      mel_bins: [5, 10, 20, 40, 80, 160, 320]
-      weighted_losses: [5, 6, 7, 8, 9, 10, 11]
+      fft_sizes: [64, 128, 256, 512, 1024, 2048]
+      mel_bins: [8, 16, 32, 64, 128, 256]
 
     adv_loss:
       _target_: soviamate.modules.criterion.LeastSquaresGANLoss
 
-    fmap_loss:
-      _target_: soviamate.modules.criterion.FeatureMatchingLoss
+    # # ASR Loss: Sequence-to-sequence loss combining CTC and RNN-T
+    # text_loss:
+    #   _target_: soviamate.modules.criterion.SequenceToSequenceLoss
+    #   embedding_dim: 512
+    #   encoder_dim: *d_model
+    #   predictor_dim: 512
+    #   joint_dim: 512
+    #   context_size: 8
+    #   vocab_size: *vocab_size
+    #   dropout: 0.1
+    #   num_samples: 1024
 
   optim:
+    total_steps: &total_steps 1171875  # (50M samples / (16 batch_size * 8 devices)) * 3 epochs
+    warmup_steps: &warmup_steps 23438  # 2% of total steps for linear warmup (1171875 * 0.02)
+    T_max: &T_max 1148437  # total_steps - warmup_steps (1171875 - 23438)
+    eta_min: &eta_min 1e-6  # Minimum learning rate for cosine annealing
+
     generator:
       optimizer:
         _target_: torch.optim.AdamW
-        lr: 0.3
+        lr: 3e-5
         betas: [0.9, 0.95]
-        weight_decay: 1e-2
         fused: true
 
       scheduler:
-        _target_: soviamate.optims.lr_scheduler.NoamAnnealing
-        d_model: *d_model
-        warmup_steps: 10000
+        # Cosine annealing with linear warmup using SequentialLR
+        _target_: torch.optim.lr_scheduler.SequentialLR
+        schedulers:
+          - _target_: torch.optim.lr_scheduler.LinearLR
+            start_factor: 1e-8
+            total_iters: *warmup_steps
+          - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+            T_max: *T_max
+            eta_min: *eta_min
+        milestones: [*warmup_steps]
 
     discriminator:
       optimizer:
         _target_: torch.optim.AdamW
-        lr: 1e-4
-        betas: [0.5, 0.9]
-        weight_decay: 1e-5
+        lr: 3e-5
+        betas: [0.9, 0.95]
         fused: true
 
       scheduler:
-        _target_: torch.optim.lr_scheduler.ExponentialLR
-        gamma: 0.95
+        # Cosine annealing with linear warmup using SequentialLR
+        _target_: torch.optim.lr_scheduler.SequentialLR
+        schedulers:
+          - _target_: torch.optim.lr_scheduler.LinearLR
+            start_factor: 1e-8
+            total_iters: *warmup_steps
+          - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+            T_max: *T_max
+            eta_min: *eta_min
+        milestones: [*warmup_steps]
 
 callbacks:
   lr:
@@ -128,12 +184,11 @@ callbacks:
 
   cb:
     _target_: lightning.pytorch.callbacks.ModelCheckpoint
-    monitor: train_loss
+    filename: "{epoch}-{step}-{val_loss:.5f}"
+    monitor: val_loss
     save_top_k: 10
     save_last: true
-    save_weights_only: true
-    filename: "{epoch}-{step}-{train_loss:.5f}"
-    every_n_train_steps: 100000
+    every_n_train_steps: 200000
 
 loggers:
   tb:
@@ -148,6 +203,5 @@ trainer:
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 10
-  val_check_interval: 100000
-
+  max_epochs: 3
+  val_check_interval: 99999

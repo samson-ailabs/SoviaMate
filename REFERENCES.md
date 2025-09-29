@@ -18,6 +18,8 @@
 
 5. [RefXVC: Cross-Lingual Voice Conversion with Enhanced Reference Leveraging](https://arxiv.org/pdf/2406.16326)
 
+6. [SpectroStream: A Versatile Neural Codec for General Audio](https://arxiv.org/pdf/2508.05207)
+
 ## Large Language Models
 
 1. [SLAM-Omni: Timbre-Controllable Voice Interaction System with Single-Stage Training](https://arxiv.org/pdf/2412.15649)

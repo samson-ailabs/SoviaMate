@@ -14,7 +14,7 @@
 
 """Loss Functions for different tasks"""
 
-from typing import List, Optional
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -49,11 +49,53 @@ class LeastSquaresGANLoss(nn.Module):
         return loss
 
 
-class FeatureMatchingLoss(nn.Module):
-    """Feature Matching Loss for GANs.
+class HingeGANLoss(nn.Module):
+    """Hinge loss for Generative Adversarial Networks.
 
-    This loss encourages the generator to produce samples that match the statistics
-    of real data in the feature space of the discriminator.
+    Implements the classical GAN objective with hinge loss for discriminator and generator
+    as described in "Spectral Normalization for Generative Adversarial Networks" and other papers.
+
+    For discriminator: L_D(x) = (1/N) * sum_n [max(0, 1 - D_n(x)) + max(0, 1 + D_n(G(x)))]
+    For generator: L_G^adv(x) = (1/N) * sum_n max(0, 1 - D_n(G(x)))
+
+    Where:
+    - N is the number of logits (combined from multiple discriminators if applicable)
+    - D_n(x) is the n-th logit output
+    """
+
+    def forward(
+        self,
+        outputs: torch.Tensor,
+        targets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute hinge loss for discriminator or generator.
+
+        Args:
+            outputs (Tensor): discriminator outputs for fake samples.
+            targets (Tensor, optional): discriminator outputs for real samples.
+                If None, computes generator loss. If provided, computes discriminator loss.
+
+        Returns:
+            Tensor: Hinge loss value.
+        """
+
+        if targets is None:
+            # Generator loss: max(0, 1 - D(fake))
+            return torch.mean(F.relu(1.0 - outputs))
+
+        else:
+            # Discriminator loss: max(0, 1 - D(real)) + max(0, 1 + D(fake))
+            return torch.mean(F.relu(1.0 - targets)) + torch.mean(F.relu(1.0 + outputs))
+
+
+class FeatureMatchingLoss(nn.Module):
+    """Feature Matching Loss for GANs following SpectroStream paper.
+
+    Implements equation (5) from SpectroStream:
+    L_feat_G(x) = 1/(KL) * Σ(k,l) 1/M_k,l * ||D_k^(l)(x) - D_k^(l)(G(x))||_1
+
+    Where K is number of discriminator scales, L is number of intermediate layers,
+    and M_k,l is the size of the l-th intermediate output tensor.
     """
 
     def forward(
@@ -65,19 +107,25 @@ class FeatureMatchingLoss(nn.Module):
             real_features (List[Tensor]): List of features from discriminator for real samples
 
         Returns:
-            Tensor: Feature matching loss.
+            Tensor: Feature matching loss following SpectroStream formulation.
         """
 
-        losses = 0.0
+        total_loss = 0.0
+
         for fake_feat, real_feat in zip(fake_features, real_features):
+            # L1 loss normalized by tensor size: 1/M_k,l * ||D_k^(l)(x) - D_k^(l)(G(x))||_1
             loss = F.l1_loss(fake_feat, real_feat, reduction="none")
-            loss = loss / real_feat.abs().mean(dim=(1, 2), keepdim=True)
-            losses += loss.mean()
+            total_loss += loss.sum() / fake_feat.numel()
 
-        return losses / len(real_features)
+        # SpectroStream averages over all feature maps: 1/(K*L) normalization
+        # where K*L = total number of feature maps from all discriminator scales and layers
+        num_feature_maps = len(fake_features)
+        total_loss = total_loss / num_feature_maps
+
+        return total_loss
 
 
-class MultiResolutionMelLoss(nn.Module):
+class MelSpectralEnergyLoss(nn.Module):
     """
     Multi-Resolution Mel-Spectrogram Loss for audio reconstruction.
 
@@ -86,52 +134,34 @@ class MultiResolutionMelLoss(nn.Module):
     and mel bin sizes to better capture frequency information at multiple time-scales.
 
     Args:
-        sample_rate (int): Audio sample rate
-        window_lengths (List[int]): List of window lengths for STFT
-        hop_lengths (List[int], optional): List of hop lengths for STFT.
-        mel_bins (List[int], optional): List of mel bin sizes corresponding to each window length.
-        weighted_losses (List[int], optional): List of weights for each resolution loss.
+        sample_rate (int): Sample rate of the audio signals.
+        window_lengths (List[int]): List of window lengths for STFT.
+        mel_bins (List[int]): List of mel bin sizes corresponding to each window length.
     """
 
-    def __init__(
-        self,
-        sample_rate: int,
-        window_lengths: List[int],
-        hop_lengths: Optional[List[int]] = None,
-        mel_bins: Optional[List[int]] = None,
-        weighted_losses: Optional[List[int]] = None,
-    ):
+    def __init__(self, sample_rate: int, fft_sizes: List[int], mel_bins: List[int]):
         super().__init__()
 
-        # Validate input configurations
-        assert len(window_lengths) > 0, "Must provide at least one window length"
+        assert len(fft_sizes) == len(mel_bins), (
+            "fft_sizes and mel_bins must have same length"
+        )
 
-        # Ensure all lists have the same length
-        assert (
-            len(window_lengths)
-            == len(hop_lengths)
-            == len(mel_bins)
-            == len(weighted_losses)
-        ), "window_lengths, hop_lengths, mel_bins and weighted_losses must have the same length"
-
-        # Create mel spectrogram transforms for each resolution
         self.sample_rate = sample_rate
-        self.window_lengths = window_lengths
-        self.hop_lengths = hop_lengths
+        self.fft_sizes = fft_sizes
         self.mel_bins = mel_bins
-        self.weighted_losses = weighted_losses
 
         self.mel_spectrograms = nn.ModuleList()
-        for window_length, hop_length, num_mels in zip(
-            window_lengths, hop_lengths, mel_bins
-        ):
+        for fft_size, n_mels in zip(fft_sizes, mel_bins):
             self.mel_spectrograms.append(
                 T.MelSpectrogram(
                     sample_rate=sample_rate,
-                    n_fft=window_length,
-                    win_length=window_length,
-                    hop_length=hop_length,
-                    n_mels=num_mels,
+                    n_fft=fft_size,
+                    win_length=fft_size,
+                    hop_length=fft_size // 4,
+                    n_mels=n_mels,
+                    power=1.0,
+                    norm="slaney",
+                    mel_scale="slaney",
                 )
             )
 
@@ -162,7 +192,8 @@ class MultiResolutionMelLoss(nn.Module):
 
         # Calculate loss at each resolution
         total_loss = 0.0
-        for i, mel_spectrogram in enumerate(self.mel_spectrograms):
+
+        for mel_spectrogram in self.mel_spectrograms:
             # Compute mel spectrograms
             mel_outputs = mel_spectrogram(outputs).clamp(min=1e-5).log()
             mel_targets = mel_spectrogram(targets).clamp(min=1e-5).log()
@@ -173,10 +204,10 @@ class MultiResolutionMelLoss(nn.Module):
 
             # Compute L1 loss between mel spectrograms
             loss = F.l1_loss(mel_outputs, mel_targets, reduction="none")
-            loss = (loss * curr_masks).sum((1, 2)) / curr_masks.sum((1, 2))
+            loss = (loss * curr_masks).sum() / curr_masks.sum()
 
             # Combine losses across resolutions
-            total_loss += 1.0 / self.weighted_losses[i] * loss.mean()
+            total_loss += loss
 
         return total_loss
 
@@ -206,7 +237,6 @@ class SequenceToSequenceLoss(nn.Module):
         dropout: float,
         num_samples: int,
     ) -> None:
-
         super().__init__()
         self.blank_token = 0
 

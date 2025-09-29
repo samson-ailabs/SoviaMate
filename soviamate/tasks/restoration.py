@@ -15,6 +15,7 @@
 """Audio Neural Codec Models for learning audio discrete tokens"""
 
 import itertools
+import random
 from typing import Optional, Tuple
 
 import lightning as L
@@ -24,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-SEGMENT_SIZE = 8192
+from soviamate.modules.discriminator import SEGMENT_SIZE
 
 
 class AudioCodecTask(L.LightningModule):
@@ -37,13 +38,30 @@ class AudioCodecTask(L.LightningModule):
     """
 
     def __init__(self, *args, **kwargs) -> None:
-
         super().__init__()
 
         self.automatic_optimization = False
         self.save_hyperparameters("data", "model", "optim")
 
         self.audio_encoder = instantiate(self.hparams.model.audio_encoder)
+
+        # ASR components
+        if hasattr(self.hparams.model, "text_decoder"):
+            self.text_decoder = instantiate(self.hparams.model.text_decoder)
+        else:
+            self.text_decoder = None
+
+        # Speaker adaptation components
+        if hasattr(self.hparams.model, "speaker_encoder"):
+            self.speaker_encoder = instantiate(self.hparams.model.speaker_encoder)
+        else:
+            self.speaker_encoder = None
+
+        if hasattr(self.hparams.model, "speaker_adapter"):
+            self.speaker_adapter = instantiate(self.hparams.model.speaker_adapter)
+        else:
+            self.speaker_adapter = None
+
         self.audio_quantizer = instantiate(self.hparams.model.audio_quantizer)
         self.audio_decoder = instantiate(self.hparams.model.audio_decoder)
 
@@ -51,7 +69,13 @@ class AudioCodecTask(L.LightningModule):
 
         self.audio_loss = instantiate(self.hparams.model.audio_loss)
         self.adv_loss = instantiate(self.hparams.model.adv_loss)
-        self.fmap_loss = instantiate(self.hparams.model.fmap_loss)
+
+        # ASR loss if text decoder is present
+        if self.text_decoder is not None:
+            if hasattr(self.hparams.model, "text_loss"):
+                self.text_loss = instantiate(self.hparams.model.text_loss)
+            else:
+                self.text_loss = torch.nn.CrossEntropyLoss(ignore_index=-1)
 
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
@@ -84,16 +108,42 @@ class AudioCodecTask(L.LightningModule):
         input_audios: torch.Tensor,
         input_lengths: torch.Tensor,
         target_lengths: Optional[torch.Tensor] = None,
+        speaker_prompts: Optional[torch.Tensor] = None,
+        speaker_prompt_lengths: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        # Encode audio
         encoder_outputs, encoder_lengths = self.audio_encoder(
             input_audios, input_lengths
         )
 
-        encoder_outputs = self.audio_quantizer(encoder_outputs)
+        # ASR: Extract text before quantization
+        asr_outputs = None
+        if self.text_decoder is not None:
+            asr_outputs = self.text_decoder(encoder_outputs)
 
+        # Quantize the features first
+        quantized_outputs = self.audio_quantizer(encoder_outputs)
+
+        # Speaker adaptation AFTER quantization
+        if self.speaker_encoder is not None and speaker_prompts is not None:
+            # Extract speaker embeddings from prompt
+            spk_utt_embs, spk_frm_embs, spk_frm_lens = self.speaker_encoder(
+                speaker_prompts, speaker_prompt_lengths
+            )
+
+            # Apply speaker adaptation on quantized features
+            if self.speaker_adapter is not None:
+                quantized_outputs, encoder_lengths = self.speaker_adapter(
+                    quantized_outputs,
+                    encoder_lengths,
+                    spk_utt_embs,
+                    spk_frm_embs,
+                    spk_frm_lens,
+                )
+
+        # Decode to audio
         decoder_outputs, decoder_lengths = self.audio_decoder(
-            encoder_outputs, encoder_lengths
+            quantized_outputs, encoder_lengths
         )
 
         if target_lengths is not None:
@@ -103,12 +153,30 @@ class AudioCodecTask(L.LightningModule):
             )
             decoder_lengths = target_lengths.clone()
 
-        return decoder_outputs, decoder_lengths
+        return decoder_outputs, decoder_lengths, asr_outputs, encoder_outputs
 
     def training_step(self, batch: Tuple[torch.Tensor, ...]):
+        (
+            input_audios,
+            input_lengths,
+            speaker_prompts,
+            speaker_prompt_lengths,
+            target_audios,
+            target_lengths,
+            target_texts,
+            target_text_lengths,
+        ) = batch
 
-        input_audios, input_lengths, _, _, target_audios, target_lengths, _, _ = batch
-        output_audios, _ = self.forward(input_audios, input_lengths, target_lengths)
+        # Forward pass with speaker adaptation
+        forward_outputs = self.forward(
+            input_audios,
+            input_lengths,
+            target_lengths,
+            speaker_prompts,
+            speaker_prompt_lengths,
+        )
+
+        output_audios, _, asr_outputs, encoder_features = forward_outputs
 
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)
@@ -119,21 +187,21 @@ class AudioCodecTask(L.LightningModule):
         # Train discriminator
         self.toggle_optimizer(disc_optim)
 
-        outputs, targets = self._get_random_segments(
-            output_audios, target_audios, target_lengths
-        )
+        if random.random() < 0.5:  # Train discriminator every 50% of the time
+            outputs, targets = self._get_random_segments(
+                output_audios, target_audios, target_lengths
+            )
 
-        outputs = self.discriminator(outputs.detach())
-        targets = self.discriminator(targets.detach())
+            fake_logits = self.discriminator(outputs.detach())
+            real_logits = self.discriminator(targets.detach())
 
-        disc_loss = self.adv_loss(outputs, targets)
-        self.manual_backward(disc_loss)
+            disc_loss = self.adv_loss(fake_logits, real_logits)
+            self.manual_backward(disc_loss)
 
-        disc_optim.step()
-        disc_optim.zero_grad()
+            disc_optim.step()
+            disc_optim.zero_grad()
 
-        if self.trainer.is_last_batch:
-            disc_sched.step()
+        disc_sched.step()  # Update discriminator scheduler every step
 
         self.untoggle_optimizer(disc_optim)
 
@@ -146,34 +214,67 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs = self.discriminator(outputs)
-        gen_loss = self.adv_loss(outputs)
+        logits = self.discriminator(outputs)
+        gen_loss = self.adv_loss(logits)
 
-        train_loss = 2.0 * audio_loss + 1.0 * gen_loss
+        # Add ASR loss if available (sequence-to-sequence loss)
+        text_loss = 0.0
+        if (
+            asr_outputs is not None
+            and target_texts is not None
+            and encoder_features is not None
+        ):
+            # Use sequence-to-sequence loss (CTC + RNN-T)
+            text_loss = self.text_loss(
+                encoder_outputs=encoder_features,  # Use pre-quantized features
+                encoder_lengths=input_lengths,
+                decoder_outputs=asr_outputs,
+                decoder_lengths=input_lengths,  # Use same lengths as encoder
+                target_tokens=target_texts,
+                target_lengths=target_text_lengths,
+            )
+
+        train_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
         self.manual_backward(train_loss)
 
         gen_optim.step()
         gen_optim.zero_grad()
-
         gen_sched.step()
 
         self.untoggle_optimizer(gen_optim)
 
         # Log losses
-        self.log_dict(
-            {
-                "train_audio_loss": audio_loss,
-                "train_gen_loss": gen_loss,
-                "train_disc_loss": disc_loss,
-            },
-            sync_dist=True,
-        )
+        log_dict = {"train_audio_loss": audio_loss, "train_gen_loss": gen_loss}
+        if "disc_loss" in locals():
+            log_dict["train_disc_loss"] = disc_loss
+        if asr_outputs is not None:
+            log_dict["train_text_loss"] = text_loss
 
+        self.log_dict(log_dict, sync_dist=True)
         self.log("train_loss", train_loss, sync_dist=True, prog_bar=True)
 
     def validation_step(self, batch: Tuple[torch.Tensor, ...]):
-        input_audios, input_lengths, _, _, target_audios, target_lengths, _, _ = batch
-        output_audios, _ = self.forward(input_audios, input_lengths, target_lengths)
+        (
+            input_audios,
+            input_lengths,
+            speaker_prompts,
+            speaker_prompt_lengths,
+            target_audios,
+            target_lengths,
+            target_texts,
+            target_text_lengths,
+        ) = batch
+
+        # Forward pass
+        forward_outputs = self.forward(
+            input_audios,
+            input_lengths,
+            target_lengths,
+            speaker_prompts,
+            speaker_prompt_lengths,
+        )
+
+        output_audios, _, asr_outputs, encoder_features = forward_outputs
 
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)
@@ -184,25 +285,38 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        outputs = self.discriminator(outputs)
-        gen_loss = self.adv_loss(outputs)
+        logits = self.discriminator(outputs)
+        gen_loss = self.adv_loss(logits)
 
-        val_loss = 2.0 * audio_loss + 1.0 * gen_loss
+        # Add ASR loss if available (sequence-to-sequence loss)
+        text_loss = 0.0
+        if (
+            asr_outputs is not None
+            and target_texts is not None
+            and encoder_features is not None
+        ):
+            # Use sequence-to-sequence loss (CTC + RNN-T)
+            text_loss = self.text_loss(
+                encoder_outputs=encoder_features,  # Use pre-quantized features
+                encoder_lengths=input_lengths,
+                decoder_outputs=asr_outputs,
+                decoder_lengths=input_lengths,  # Use same lengths as encoder
+                target_tokens=target_texts,
+                target_lengths=target_text_lengths,
+            )
 
-        self.log_dict(
-            {
-                "val_audio_loss": audio_loss,
-                "val_gen_loss": gen_loss,
-            },
-            sync_dist=True,
-        )
+        val_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
 
+        log_dict = {"val_audio_loss": audio_loss, "val_gen_loss": gen_loss}
+        if asr_outputs is not None:
+            log_dict["val_text_loss"] = text_loss
+
+        self.log_dict(log_dict, sync_dist=True)
         self.log("val_loss", val_loss, sync_dist=True, prog_bar=True)
 
     def _get_random_segments(
         self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         b, c, _ = outputs.size()
         max_start_index = lengths - SEGMENT_SIZE
 
@@ -231,24 +345,68 @@ class AudioCodecTask(L.LightningModule):
         disc_optim = instantiate(
             self.hparams.optim.discriminator.optimizer, params=disc_params
         )
-        disc_sched = instantiate(
-            self.hparams.optim.discriminator.scheduler, optimizer=disc_optim
-        )
 
-        gen_params = itertools.chain(
+        # For SequentialLR, we need to create the nested schedulers manually
+        # since Hydra can't instantiate them with the optimizer dependency
+        scheduler_config = self.hparams.optim.discriminator.scheduler
+
+        if hasattr(scheduler_config, "schedulers"):
+            # Create the nested schedulers first
+            nested_schedulers = []
+            for sched_cfg in scheduler_config.schedulers:
+                nested_scheduler = instantiate(sched_cfg, optimizer=disc_optim)
+                nested_schedulers.append(nested_scheduler)
+
+            # Create the SequentialLR with the nested schedulers
+            disc_sched = instantiate(
+                scheduler_config, optimizer=disc_optim, schedulers=nested_schedulers
+            )
+        else:
+            # Regular scheduler instantiation
+            disc_sched = instantiate(scheduler_config, optimizer=disc_optim)
+
+        gen_param_groups = [
             self.audio_encoder.parameters(),
             self.audio_quantizer.parameters(),
             self.audio_decoder.parameters(),
-        )
+        ]
+
+        # Add ASR parameters if available
+        if self.text_decoder is not None:
+            gen_param_groups.append(self.text_decoder.parameters())
+
+        # Add speaker adaptation parameters if available
+        if self.speaker_encoder is not None:
+            gen_param_groups.append(self.speaker_encoder.parameters())
+
+        if self.speaker_adapter is not None:
+            gen_param_groups.append(self.speaker_adapter.parameters())
+
+        gen_params = itertools.chain(*gen_param_groups)
 
         gen_optim = instantiate(
             self.hparams.optim.generator.optimizer, params=gen_params
         )
-        gen_sched = instantiate(
-            self.hparams.optim.generator.scheduler, optimizer=gen_optim
-        )
+
+        # Same handling for generator scheduler
+        scheduler_config = self.hparams.optim.generator.scheduler
+
+        if hasattr(scheduler_config, "schedulers"):
+            # Create the nested schedulers first
+            nested_schedulers = []
+            for sched_cfg in scheduler_config.schedulers:
+                nested_scheduler = instantiate(sched_cfg, optimizer=gen_optim)
+                nested_schedulers.append(nested_scheduler)
+
+            # Create the SequentialLR with the nested schedulers
+            gen_sched = instantiate(
+                scheduler_config, optimizer=gen_optim, schedulers=nested_schedulers
+            )
+        else:
+            # Regular scheduler instantiation
+            gen_sched = instantiate(scheduler_config, optimizer=gen_optim)
 
         return [disc_optim, gen_optim], [
-            {"scheduler": disc_sched, "interval": "epoch"},
+            {"scheduler": disc_sched, "interval": "step"},
             {"scheduler": gen_sched, "interval": "step"},
         ]
