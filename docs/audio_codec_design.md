@@ -2,13 +2,12 @@
 
 ## Executive Summary
 
-SoviaMate is a neural audio codec designed for ultra-low bitrate speech compression and seamless LLM integration. The architecture introduces **five breakthrough innovations** that work together to achieve semantic preservation, noise robustness, and zero-shot speaker adaptation:
+SoviaMate is a neural audio codec designed for ultra-low bitrate speech compression and seamless LLM integration. The architecture introduces **four breakthrough innovations** that work together to achieve semantic preservation, noise robustness, and zero-shot speaker adaptation:
 
 1. **ASR decoder before quantization** - Automatic semantic constraint through gradient feedback (measurable via WER)
 2. **Continuous features for LLMs** - Bypass quantization loss for maximum information preservation
 3. **Speech enhancement training** - Noisy → clean paradigm for real-world robustness
 4. **Zero-shot speaker adaptation** - Post-quantization voice injection for content-speaker decoupling
-5. **Multi-objective constraint training** - Balanced optimization (2.0:1.0:0.5 loss ratio)
 
 **Key advantages**: Ultra-low bitrate compression + Whisper-level noise robustness + zero-shot voice cloning + streaming support + direct LLM integration - all in a unified, end-to-end trainable architecture.
 
@@ -24,11 +23,10 @@ SoviaMate is a neural audio codec designed for ultra-low bitrate speech compress
 | [2. Continuous Features for LLMs](#2-continuous-features-for-llm-integration) | Information richness | Why continuous over discrete tokens? |
 | [3. Speech Enhancement Training](#3-speech-enhancement-training-paradigm) | Noise robustness | How to handle real-world audio? |
 | [4. Zero-Shot Speaker Adaptation](#4-zero-shot-speaker-adaptation-via-content-speaker-decoupling) | Voice cloning | Why post-quantization placement? |
-| [5. Multi-Objective Training](#5-multi-objective-constraint-training) | Loss function design | Why these specific weights? |
-| [6. LLM Integration](#6-llm-integration-architecture) | Downstream usage | How to integrate with speech-to-speech LLMs? |
-| [7. Comparisons](#7-comparison-with-existing-approaches) | Related work | How does it compare to EnCodec, VALL-E, Whisper? |
-| [8. Design Principles](#8-architecture-summary-and-design-principles) | System overview | What are the core design principles? |
-| [9. Status & Limitations](#9-implementation-status-limitations-and-future-directions) | Current state | What works now? What's missing? |
+| [5. LLM Integration](#5-llm-integration-architecture) | Downstream usage | How to integrate with speech-to-speech LLMs? |
+| [6. Comparisons](#6-comparison-with-existing-approaches) | Related work | How does it compare to EnCodec, VALL-E, Whisper? |
+| [7. Design Principles](#7-architecture-summary-and-design-principles) | System overview | What are the core design principles? |
+| [8. Status & Limitations](#8-implementation-status-limitations-and-future-directions) | Current state | What works now? What's missing? |
 | [Appendices](#appendices) | Deep dives | Quantizer mechanics, LLM output strategies |
 
 ---
@@ -54,11 +52,6 @@ SoviaMate is a neural audio codec designed for ultra-low bitrate speech compress
 - **Problem**: Traditional codecs encode speaker identity with content, preventing voice swapping.
 - **Solution**: Inject speaker characteristics after quantization via hybrid adapter (AdaLN + Cross-Attention).
 - **Result**: Content-speaker decoupling enables zero-shot voice cloning with 3-5 sec prompts.
-
-### Innovation 5: Multi-Objective Constraint Training
-- **Problem**: Balancing audio quality, perceptual realism, and semantic preservation.
-- **Solution**: Weighted loss function: 2.0 × L_audio + 1.0 × L_adversarial + 0.5 × L_text.
-- **Result**: ASR as constraint mechanism, not primary objective - preserves codec's core purpose.
 
 **Architecture Overview**:
 ```
@@ -387,40 +380,11 @@ By encoding speaker characteristics separately, the quantizer can focus solely o
 
 ---
 
-## 5. Multi-Objective Constraint Training
+## 5. LLM Integration Architecture
 
-### 5.1 Unified Loss Function
+### 5.1 Architecture Overview
 
-```
-L_total = 2.0 × L_audio + 1.0 × L_adversarial + 0.5 × L_text
-```
-
-**Philosophy**: Balance three complementary objectives with intentional weighting.
-
-### 5.2 Why These Weights?
-
-#### L_audio (λ=2.0) - Highest Priority
-
-Multi-resolution mel-spectral loss ensures the codec's primary function—audio compression and reconstruction—is never compromised for secondary objectives.
-
-#### L_adversarial (λ=1.0) - Medium Priority
-
-Multi-scale spectral discriminator pushes generator toward perceptually realistic audio beyond objective metrics. Reduces metallic/robotic artifacts common in neural codecs.
-
-#### L_text (λ=0.5) - Intentionally Lower
-
-This is a **constraint mechanism**, not the primary objective:
-- ASR needs to succeed enough to preserve semantics
-- Not aiming for state-of-the-art ASR accuracy
-- Prevents codec from becoming an ASR system at the expense of audio quality
-
-**Key insight**: The semantic loss weight (0.5) reflects that ASR is a **means to an end** (semantic preservation), not the end goal itself. This weight creates the constraint without overwhelming the primary audio objective.
-
----
-
-## 6. LLM Integration Architecture
-
-### 6.1 Continuous Features Flow
+The architecture enables seamless speech-to-speech LLM integration through a carefully designed data flow:
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
@@ -447,85 +411,75 @@ This is a **constraint mechanism**, not the primary objective:
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Key Integration Advantages
+**Key design**: Continuous features (input path) → LLM processing → Continuous/discrete features (output path) → Speaker injection → Speech synthesis.
 
-#### 1. Maximum Semantic Information
+### 5.2 Input Path: Rich Feature Extraction
 
-- Continuous features contain full semantic content (proven by ASR task)
+The codec provides LLMs with continuous pre-quantization features that contain complete semantic and acoustic information:
+
+**Maximum Semantic Information**:
+- Full semantic and acoustic richness preserved (see [Section 2.2](#22-why-continuous-features-are-superior))
 - No information loss from quantization in LLM input path
-- Rich acoustic features (prosody, emotion, speaker) available to LLM
+- Direct verification through WER metrics via integrated ASR decoder
 
-#### 2. Noise-Robust LLM Input
+**Noise-Robust Features by Design**:
+- Speech enhancement training (detailed in [Section 3.2](#32-the-solution-train-as-noisy--clean-enhancement-system)) ensures encoder extracts clean semantic-rich features from noisy input
+- ASR decoder validates semantic preservation on noisy test data
+- Consistent LLM performance regardless of input audio quality
 
-Speech enhancement training provides critical benefits:
-- Encoder outputs clean semantic-rich features even from noisy input
-- LLM receives noise-free representations for better understanding
-- Consistent performance in real-world conditions
+### 5.3 LLM Processing: Multi-Modal Understanding
 
-#### 3. Unified Multi-Modal Processing
+The architecture enables seamless integration of speech and text modalities within the LLM:
 
-- LLM processes speech and text in continuous space
-- Cross-modal attention enables deep integration
-- Single model handles speech-to-speech, text-to-speech, speech-to-text
+**Unified Continuous Space**:
+- LLM processes speech and text in unified continuous representation space
+- Cross-modal attention enables deep integration between modalities
+- Single model handles speech-to-speech, text-to-speech, speech-to-text without architectural changes
 
-#### 4. Parallel Text Processing
+**Parallel Text Processing for Hybrid Reasoning**:
+- ASR decoder operates in parallel with audio processing to extract text representations
+- Dialogue history stored in compact text format (smaller memory footprint than audio/continuous features)
+- Fast text-based search and retrieval for knowledge grounding
+- Combine acoustic features (emotion, prosody) with symbolic text (semantic content)
+- Enable both intuitive (acoustic) and logical (symbolic) understanding
 
-ASR decoder enables text-grounded capabilities:
-- Dialogue history in efficient text format
-- Text-based retrieval for knowledge grounding
-- Hybrid reasoning: acoustic features + symbolic text
+### 5.4 Output Path: Flexible Generation
 
-#### 5. Flexible Deployment
+The architecture supports both continuous and discrete LLM outputs with intelligent design choices:
 
-- Streaming support for low-latency conversation
-- Speaker adaptation for personalized voices
-- Pre-trained codec frozen—only train small adapters
+**Speaker Consistency in Long Conversations**:
+- Post-quantization speaker adapter provides critical advantages for long-form dialogue
+- LLM focuses purely on language understanding and response generation (not voice characteristics)
+- Speaker adapter acts as stability mechanism—voice timbre, speaking rate, and prosody patterns remain consistent even if LLM context degrades
+- Content generation and voice identity are decoupled—more stable natural conversations
 
-#### 6. Speaker Consistency in Long Conversations
-
-The post-quantization speaker adapter provides a critical advantage for long-form speech-to-speech dialogue:
-
-**LLM Focus on Language, Not Voice**:
-- LLM doesn't need to learn or maintain speaker voice characteristics
-- Can focus purely on language understanding and response generation
-- Simpler training objective for the language model
-
-**Consistency Anchor for Extended Conversations**:
-- In long conversations (hours), LLMs may forget distant context or lose consistency in generated prosody
-- **Speaker adapter acts as a stability mechanism**: Even if LLM forgets some context, the speaking style and voice characteristics remain consistent throughout the conversation
-- Voice timbre, speaking rate, and basic prosody patterns are maintained by the adapter, not the LLM
-
-**Why this matters**:
-- Traditional approaches require LLM to generate both content and voice characteristics—if LLM context degrades, voice consistency degrades
-- **Our approach**: Content generation and voice identity are decoupled—LLM handles content, speaker adapter ensures voice consistency
-- Result: More stable and natural long-form conversations with consistent speaking style
-
-#### 7. Design Flexibility: Fallback for Discrete-Only LLMs
-
-The post-quantization speaker adapter placement provides architectural flexibility:
-
-**Accommodates Different LLM Designs**:
+**Design Flexibility for Different LLM Architectures**:
 - **Primary path**: LLM learns to output continuous features (preferred for maximum quality)
-- **Fallback path**: If LLM can only handle discrete tokens → LLM outputs discrete tokens → Speaker adapter still enables multi-speaker synthesis
-- **Design robustness**: Works with both continuous and discrete LLM outputs
-
-**Why this flexibility matters**:
-- Not all LLMs can easily learn continuous output generation
-- Training LLMs with continuous targets is more challenging and computationally expensive
-- Discrete token approach (like VALL-E) is a well-established, simpler integration path
+- **Fallback path**: LLM outputs discrete tokens, speaker adapter still enables multi-speaker synthesis
 - Post-quantization speaker adapter ensures multi-speaker capability regardless of LLM output type
+- Works with both continuous (higher quality) and discrete (simpler training) approaches
 
-**Result**: The architecture doesn't force a specific LLM design—it gracefully supports both continuous (higher quality) and discrete (simpler training) approaches.
+**Recommended Strategy**: See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-deep-dive) for detailed analysis of continuous vs. discrete LLM outputs, including the codebook size dilemma and finite continuous features solution.
 
-### 6.3 LLM Output Strategy: Continuous vs. Discrete
+### 5.5 Deployment Considerations
 
-See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-deep-dive) for detailed analysis of continuous vs. discrete LLM outputs, including the codebook size dilemma and finite continuous features solution.
+The architecture supports efficient deployment across different real-world scenarios:
+
+**Streaming Inference**:
+- Full pipeline streaming support for low-latency conversation
+- Configurable chunk sizes for latency-throughput trade-offs
+- Real-time processing without buffering entire utterances
+
+**Efficient Adaptation**:
+- Pre-trained codec can remain frozen—only train small adapter layers for specific use cases
+- Speaker adaptation for personalized voices without retraining codec
+- Fast fine-tuning for specific domains or deployment environments
 
 ---
 
-## 7. Comparison with Existing Approaches
+## 6. Comparison with Existing Approaches
 
-### 7.1 Traditional Neural Codecs (EnCodec, SoundStream, DAC)
+### 6.1 Traditional Neural Codecs (EnCodec, SoundStream, DAC)
 
 **Their approach**: Optimize for perceptual quality, rely on VQ or RVQ quantization
 
@@ -540,7 +494,7 @@ See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-
 - Ultra-low bitrate compression
 - Speech enhancement for noise robustness
 
-### 7.2 Semantic Codecs (AudioPaLM, SpeechGPT, VALL-E)
+### 6.2 Semantic Codecs (DualCodec, X-Codec, VALL-E)
 
 **Their approach**: Depend on external SSL models (WavLM, HUBERT) or discrete tokens (EnCodec)
 
@@ -556,7 +510,7 @@ See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-
 - Explicit speaker adapter with zero-shot capability
 - Built-in speech enhancement for noise robustness
 
-### 7.3 Multi-Speaker TTS Models (VITS, YourTTS, Mega-TTS)
+### 6.3 Multi-Speaker TTS Models (VITS, YourTTS, Mega-TTS)
 
 **Their approach**: Speaker embeddings or encoders requiring fine-tuning
 
@@ -573,9 +527,9 @@ See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-
 
 ---
 
-## 8. Architecture Summary and Design Principles
+## 7. Architecture Summary and Design Principles
 
-### 8.1 Five Breakthroughs at a Glance
+### 7.1 Four Breakthroughs at a Glance
 
 | Breakthrough | Core Innovation | Key Benefit | Implementation |
 |--------------|----------------|-------------|----------------|
@@ -583,9 +537,8 @@ See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-
 | **2. Continuous Features** | Bypass quantization for LLM | Zero information loss for rich understanding | Pre-quantization features → LLM adapters |
 | **3. Speech Enhancement** | Noisy → clean training paradigm | Whisper-level noise robustness by design | Encoder trained on degraded audio |
 | **4. Zero-Shot Speaker** | Post-quantization speaker injection | Content-speaker decoupling, voice swapping | SpeakerAdapter after quantization |
-| **5. Multi-Objective Training** | Balanced constraint optimization | Audio quality + perceptual + semantic | 2.0:1.0:0.5 loss ratio |
 
-### 8.2 Design Principles
+### 7.2 Design Principles
 
 **Placement Strategy**:
 - **Before Quantization**: ASR decoder (semantic constraint), continuous feature extraction (LLM input)
@@ -603,7 +556,7 @@ See [Appendix B: LLM Output Strategy Deep Dive](#appendix-b-llm-output-strategy-
 - **Decoder Input**: Codebook-based continuous vectors (bounded feature space)
 - **Speaker Control**: Post-quantization injection (zero-shot, voice consistency)
 
-### 8.3 Why This Architecture Succeeds
+### 7.3 Why This Architecture Succeeds
 
 The architecture achieves four critical objectives simultaneously:
 
@@ -616,12 +569,12 @@ The architecture achieves four critical objectives simultaneously:
 
 ---
 
-## 9. Implementation Status, Limitations and Future Directions
+## 8. Implementation Status, Limitations and Future Directions
 
-### 9.1 Implementation Status
+### 8.1 Implementation Status
 
 **Architecture**: ✅ Fully implemented and operational
-- All five breakthrough innovations integrated into working system
+- All four breakthrough innovations integrated into working system
 - Encoder, decoder, quantizer, ASR decoder, speaker adapter modules complete
 - Streaming inference support across entire pipeline
 - Code available at: https://github.com/samson-voice/SoviaMate
@@ -644,7 +597,7 @@ The architecture achieves four critical objectives simultaneously:
 - ✅ Speech enhancement (noisy → clean)
 - ⏳ LLM integration adapters (planned)
 
-### 9.2 Current Limitations
+### 8.2 Current Limitations
 
 **1. Single Codebook Quantization**
 - Fixed bitrate—no rate-distortion control
@@ -658,7 +611,7 @@ The architecture achieves four critical objectives simultaneously:
 - No objective metrics (PESQ, VISQOL, WER) reported yet
 - Future: Benchmark against EnCodec, SoundStream, VALL-E
 
-### 9.3 Long-Term Research Directions
+### 8.3 Long-Term Research Directions
 
 **1. LLM Integration**
 - Train adapter layers for speech LLM integration
@@ -677,9 +630,9 @@ The architecture achieves four critical objectives simultaneously:
 
 ---
 
-## 10. Conclusion
+## 9. Conclusion
 
-SoviaMate introduces five architectural breakthroughs that address fundamental limitations of existing approaches:
+SoviaMate introduces four architectural breakthroughs that address fundamental limitations of existing approaches:
 
 1. **Integrated ASR decoder before quantization** constrains the audio encoder to produce semantic-rich features through gradient feedback—no black-box SSL models, direct WER metrics, controllable learning.
 
@@ -688,8 +641,6 @@ SoviaMate introduces five architectural breakthroughs that address fundamental l
 3. **Speech enhancement training** provides Whisper-level noise robustness by design—encoder extracts clean features from noisy input, enabling practical real-world deployment.
 
 4. **Zero-shot speaker adaptation after quantization** enables voice swapping without re-encoding—content-speaker decoupling with dual-level conditioning.
-
-5. **Multi-objective constraint training** balances acoustic fidelity, perceptual quality, and semantic preservation—ASR as constraint mechanism (λ=0.5), not optimization target.
 
 **The unified insight**: By forcing semantic understanding *before* compression (integrated ASR), preserving continuous features *beyond* quantization (for LLMs), and injecting speaker identity *after* quantization (for zero-shot adaptation), the architecture serves dual purposes:
 
@@ -752,7 +703,7 @@ Quantization enables more stable training:
 
 ### Appendix B: LLM Output Strategy Deep Dive
 
-While the architecture supports both continuous and discrete LLM outputs (via fallback mechanism in Section 6.2, subsection 7), there are strong reasons to prefer continuous features:
+While the architecture supports both continuous and discrete LLM outputs (via fallback mechanism in [Section 5.4](#54-output-path-flexible-generation)), there are strong reasons to prefer continuous features:
 
 #### The Codebook Size Dilemma
 
