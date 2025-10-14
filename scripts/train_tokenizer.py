@@ -13,9 +13,9 @@ from soviamate.datas.tokenizer import SentencePieceTokenizer
 def train_tokenizer(
     input_file: str,
     model_dir: str = "models",
-    model_name: str = "asr_tokenizer_8k",
-    vocab_size: int = 8000,
-    character_coverage: float = 1.0,
+    model_name: str = "asr_tokenizer",
+    vocab_size: int = 1024,
+    character_coverage: float = 0.9995,
     model_type: str = "bpe",
 ) -> None:
     """Train SentencePiece tokenizer on conversation data.
@@ -129,10 +129,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train SentencePiece tokenizer")
     parser.add_argument("--input", "-i", required=True, help="Input text file")
     parser.add_argument("--model-dir", default="models", help="Model directory")
-    parser.add_argument("--model-name", default="asr_tokenizer_8k", help="Model name")
-    parser.add_argument("--vocab-size", type=int, default=8000, help="Vocabulary size")
+    parser.add_argument("--model-name", default="asr_tokenizer", help="Model name")
+    parser.add_argument("--vocab-size", type=int, default=1024, help="Vocabulary size")
     parser.add_argument(
-        "--character-coverage", type=float, default=1.0, help="Character coverage"
+        "--character-coverage", type=float, default=0.9995, help="Character coverage"
     )
     parser.add_argument(
         "--model-type",

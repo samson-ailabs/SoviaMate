@@ -290,7 +290,7 @@ class SpeakerEncoder(nn.Module):
             Tensor: utterance-level embeddings with shape (B, 1, D).
         """
 
-        xs = self.melspec(waveforms)
+        xs = self.melspec(waveforms.transpose(1,2))
         x_lens = lengths // self.hop_length + 1
 
         xs = self.stem_2d(xs)

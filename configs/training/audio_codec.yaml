@@ -4,14 +4,14 @@ task:
   data:
     tokenizer: &tokenizer
       _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
-      model_path: models/asr_tokenizer_8k.model
-      vocab_size: 8000
-      character_coverage: 1.0
+      model_path: models/asr_tokenizer.model
+      vocab_size: &vocab_size 1025  # 1024 BPE tokens + 1 blank token (index 0)
+      character_coverage: 0.9995
       model_type: bpe
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Emilia-Dataset/trainset-english.jsonl
+      filepaths: /data/Emilia-Dataset/sub-trainset-english.jsonl
       tokenizer: *tokenizer
 
       # transforms:
@@ -37,7 +37,7 @@ task:
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Emilia-Dataset/valset-english.jsonl
+      filepaths: /data/Emilia-Dataset/sub-valset-english.jsonl
       tokenizer: *tokenizer
 
     loader:
@@ -49,7 +49,7 @@ task:
     d_model: &d_model 1024
     window_size: &window_size 640
     contexts: &contexts [[4, 16], [8, 32], [16, 64]]
-    vocab_size: &vocab_size 8000
+    vocab_size: *vocab_size
 
     audio_encoder:
       _target_: soviamate.modules.encoder.AudioEncoder
@@ -62,15 +62,17 @@ task:
       dropout: 0.1
       contexts: *contexts
 
-    # # ASR Module: Text decoder for transcription before quantization
-    # text_decoder:
-    #   _target_: soviamate.modules.decoder.TextDecoder
-    #   input_dim: *d_model
-    #   hidden_dim: 2048
-    #   output_dim: *vocab_size
-    #   dropout: 0.1
+    text_decoder:
+      _target_: soviamate.modules.decoder.TextDecoder
+      output_dim: *vocab_size
+      num_layers: 2
+      d_model: *d_model
+      ffn_dim: 4096
+      num_heads: 8
+      kernel_size: 31
+      dropout: 0.1
+      contexts: *contexts
 
-    # # Speaker adaptation components
     # speaker_encoder:
     #   _target_: soviamate.modules.encoder.SpeakerEncoder
     #   sample_rate: 16000
@@ -122,61 +124,49 @@ task:
     adv_loss:
       _target_: soviamate.modules.criterion.LeastSquaresGANLoss
 
-    # # ASR Loss: Sequence-to-sequence loss combining CTC and RNN-T
-    # text_loss:
-    #   _target_: soviamate.modules.criterion.SequenceToSequenceLoss
-    #   embedding_dim: 512
-    #   encoder_dim: *d_model
-    #   predictor_dim: 512
-    #   joint_dim: 512
-    #   context_size: 8
-    #   vocab_size: *vocab_size
-    #   dropout: 0.1
-    #   num_samples: 1024
+    text_loss:
+      _target_: soviamate.modules.criterion.SequenceToSequenceLoss
+      embedding_dim: 512
+      encoder_dim: *d_model
+      predictor_dim: 512
+      joint_dim: 512
+      context_size: 8
+      vocab_size: *vocab_size
+      dropout: 0.1
 
   optim:
-    total_steps: &total_steps 1171875  # (50M samples / (16 batch_size * 8 devices)) * 3 epochs
-    warmup_steps: &warmup_steps 23438  # 2% of total steps for linear warmup (1171875 * 0.02)
-    T_max: &T_max 1148437  # total_steps - warmup_steps (1171875 - 23438)
-    eta_min: &eta_min 1e-6  # Minimum learning rate for cosine annealing
+    total_steps: &total_steps 1000000  # (32M samples / (16 batch size * 8 gpus) * 4 epochs)
+    pct_start: &pct_start 0.01  # 0.01 * 1,000,000 = 10,000 steps for warmup
 
     generator:
       optimizer:
         _target_: torch.optim.AdamW
-        lr: 3e-5
+        lr: 1.0
         betas: [0.9, 0.95]
         fused: true
 
       scheduler:
-        # Cosine annealing with linear warmup using SequentialLR
-        _target_: torch.optim.lr_scheduler.SequentialLR
-        schedulers:
-          - _target_: torch.optim.lr_scheduler.LinearLR
-            start_factor: 1e-8
-            total_iters: *warmup_steps
-          - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-            T_max: *T_max
-            eta_min: *eta_min
-        milestones: [*warmup_steps]
+        _target_: torch.optim.lr_scheduler.OneCycleLR
+        max_lr: 5e-5
+        total_steps: *total_steps
+        pct_start: *pct_start
+        div_factor: 100
+        final_div_factor: 1000
 
     discriminator:
       optimizer:
         _target_: torch.optim.AdamW
-        lr: 3e-5
+        lr: 1.0
         betas: [0.9, 0.95]
         fused: true
 
       scheduler:
-        # Cosine annealing with linear warmup using SequentialLR
-        _target_: torch.optim.lr_scheduler.SequentialLR
-        schedulers:
-          - _target_: torch.optim.lr_scheduler.LinearLR
-            start_factor: 1e-8
-            total_iters: *warmup_steps
-          - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-            T_max: *T_max
-            eta_min: *eta_min
-        milestones: [*warmup_steps]
+        _target_: torch.optim.lr_scheduler.OneCycleLR
+        max_lr: 5e-5
+        total_steps: *total_steps
+        pct_start: *pct_start
+        div_factor: 100
+        final_div_factor: 1000
 
 callbacks:
   lr:
@@ -188,7 +178,7 @@ callbacks:
     monitor: val_loss
     save_top_k: 10
     save_last: true
-    every_n_train_steps: 200000
+    every_n_train_steps: 100000
 
 loggers:
   tb:
@@ -203,5 +193,5 @@ trainer:
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 3
-  val_check_interval: 99999
+  max_epochs: 4
+  val_check_interval: 49999

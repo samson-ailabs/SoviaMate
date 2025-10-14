@@ -20,6 +20,8 @@
 
 6. [SpectroStream: A Versatile Neural Codec for General Audio](https://arxiv.org/pdf/2508.05207)
 
+7. [Speech Enhancement Using Continuous Embeddings of Neural Audio Codec](https://arxiv.org/pdf/2502.16240v1)
+
 ## Large Language Models
 
 1. [SLAM-Omni: Timbre-Controllable Voice Interaction System with Single-Stage Training](https://arxiv.org/pdf/2412.15649)
