@@ -10,8 +10,9 @@ dependencies = [
     "hydra-core>=1.3.2",
     "lightning>=2.5.2",
     "sentencepiece>=0.2.1",
-    "torch>=2.7.1",
-    "torchaudio>=2.7.1",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "k2==1.24.4.dev20250807+cuda12.8.torch2.8.0",
 ]
 
 [project.scripts]
@@ -29,3 +30,13 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# K2 from official k2-fsa index
+[[tool.uv.index]]
+name = "k2-fsa"
+url = "https://k2-fsa.github.io/k2/cuda.html"
+explicit = true
+format = "flat"
+
+[tool.uv.sources]
+k2 = { index = "k2-fsa" }

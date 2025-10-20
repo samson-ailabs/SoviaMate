@@ -16,6 +16,7 @@
 
 from typing import List
 
+import k2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -213,7 +214,7 @@ class MelSpectralEnergyLoss(nn.Module):
 
 
 class SequenceToSequenceLoss(nn.Module):
-    r"""Integrate CTC and RNN-T loss for training sequence-to-sequence models.
+    r"""Integrate CTC and pruned RNN-T loss for training sequence-to-sequence models.
 
     Args:
         embedding_dim (int): dimension of the embedding layer.
@@ -223,6 +224,7 @@ class SequenceToSequenceLoss(nn.Module):
         context_size (int): size of the context window.
         vocab_size (int): size of the vocabulary.
         dropout (float): dropout probability.
+        s_range (int): pruning window size for RNN-T.
     """
 
     def __init__(
@@ -234,18 +236,23 @@ class SequenceToSequenceLoss(nn.Module):
         context_size: int,
         vocab_size: int,
         dropout: float,
+        s_range: int,
     ) -> None:
         super().__init__()
+        self.blank = 0
+        self.s_range = s_range
 
+        # Define predictor and joint networks for RNN-T
         self.predictor = Predictor(
             embedding_dim, predictor_dim, vocab_size, context_size, dropout
         )
+        self.joint = Joint(encoder_dim, predictor_dim, joint_dim, vocab_size)
 
-        self.joint = Joint(encoder_dim, predictor_dim, joint_dim)
-        self.linear = nn.Linear(joint_dim, vocab_size)
+        # Project encoder and predictor for pruning steps
+        self.simple_am_project = nn.Linear(encoder_dim, vocab_size)
+        self.simple_lm_project = nn.Linear(predictor_dim, vocab_size)
 
-        self.ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
-        self.rnnt_loss = T.RNNTLoss(blank=0, fused_log_softmax=True)
+        self.ctc_loss = nn.CTCLoss(blank=self.blank, zero_infinity=True)
 
     def forward(
         self,
@@ -269,6 +276,7 @@ class SequenceToSequenceLoss(nn.Module):
         Returns:
             Tensor: combined loss of CTC and RNN-T.
         """
+        # Compute CTC loss
         log_probs = decoder_outputs.permute(1, 0, 2)
         log_probs = F.log_softmax(log_probs, dim=2)
 
@@ -276,15 +284,63 @@ class SequenceToSequenceLoss(nn.Module):
             log_probs, target_tokens, decoder_lengths, target_lengths
         )
 
+        # Compute pruned RNN-T loss
         predictor_outputs, _ = self.predictor(target_tokens, target_lengths)
-        joint_outputs = self.joint(encoder_outputs, predictor_outputs)
 
-        logits = self.linear(joint_outputs).type(torch.float32)
-
-        rnnt_loss = self.rnnt_loss(
-            logits, target_tokens.int(), encoder_lengths.int(), target_lengths.int()
+        # Create boundary tensor for pruned RNN-T
+        boundary = torch.zeros(
+            (encoder_outputs.size(0), 4),
+            dtype=torch.int64,
+            device=encoder_outputs.device,
         )
+        boundary[:, 2] = target_lengths
+        boundary[:, 3] = encoder_lengths
 
-        loss = ctc_loss + rnnt_loss
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            # Ensure float32 for k2 operations
+            encoder_outputs = encoder_outputs.float()
+            predictor_outputs = predictor_outputs.float()
+
+            # Project encoder and predictor outputs
+            am = self.simple_am_project(encoder_outputs)
+            lm = self.simple_lm_project(predictor_outputs)
+
+            # Stage 1: Compute simple loss to get gradients for pruning
+            simple_loss, (px_grad, py_grad) = k2.rnnt_loss_simple(
+                lm=lm,
+                am=am,
+                symbols=target_tokens,
+                termination_symbol=self.blank,
+                boundary=boundary,
+                return_grad=True,
+            )
+
+            # Stage 2: Get pruning ranges from gradients
+            ranges = k2.get_rnnt_prune_ranges(
+                px_grad=px_grad,
+                py_grad=py_grad,
+                boundary=boundary,
+                s_range=self.s_range,
+            )
+
+            # Stage 3: Prune encoder and predictor outputs
+            am_pruned, lm_pruned = k2.do_rnnt_pruning(
+                am=encoder_outputs, lm=predictor_outputs, ranges=ranges
+            )
+
+            # Stage 4: Combine pruned outputs
+            logits = self.joint(am_pruned, lm_pruned)
+
+            # Stage 5: Compute final pruned loss
+            rnnt_loss = k2.rnnt_loss_pruned(
+                logits=logits,
+                symbols=target_tokens,
+                ranges=ranges,
+                termination_symbol=self.blank,
+                boundary=boundary,
+            )
+
+        # Step 3: Combine CTC and RNN-T losses
+        loss = 1.0 * ctc_loss + 1.0 * rnnt_loss + 0.5 * simple_loss
 
         return loss

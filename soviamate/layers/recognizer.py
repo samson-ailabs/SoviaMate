@@ -42,7 +42,6 @@ class Predictor(nn.Module):
         context_size: int,
         dropout: float,
     ) -> None:
-
         super().__init__()
         self.blank_token = 0
 
@@ -122,13 +121,17 @@ class Joint(nn.Module):
     """
 
     def __init__(
-        self, encoder_hidden: int, predictor_hidden: int, joint_hidden: int
+        self,
+        encoder_hidden: int,
+        predictor_hidden: int,
+        joint_hidden: int,
+        vocab_size: int,
     ) -> None:
-
         super().__init__()
 
         self.enc_proj = nn.Linear(encoder_hidden, joint_hidden)
         self.pred_proj = nn.Linear(predictor_hidden, joint_hidden)
+        self.linear_out = nn.Linear(joint_hidden, vocab_size)
 
     def forward(
         self, encoder_outputs: torch.Tensor, predictor_outputs: torch.Tensor
@@ -145,8 +148,8 @@ class Joint(nn.Module):
 
         enc_outs = self.enc_proj(encoder_outputs)
         pred_outs = self.pred_proj(predictor_outputs)
-
-        outputs = enc_outs.unsqueeze(2) + pred_outs.unsqueeze(1)
-        outputs = F.relu(outputs.contiguous())
+        
+        joint_outs = F.relu(enc_outs + pred_outs)
+        outputs = self.linear_out(joint_outs)
 
         return outputs
