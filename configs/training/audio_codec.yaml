@@ -73,22 +73,21 @@ task:
       dropout: 0.1
       contexts: *contexts
 
-    # speaker_encoder:
-    #   _target_: soviamate.modules.encoder.SpeakerEncoder
-    #   sample_rate: 16000
-    #   n_fft: 1024
-    #   win_length: 1024
-    #   hop_length: 256
-    #   num_channels: 64
-    #   num_frequencies: 80
-    #   pooling_dim: 128
-    #   output_dim: *d_model
-
     # speaker_adapter:
     #   _target_: soviamate.modules.adapter.SpeakerAdapter
     #   input_dim: *d_model
-    #   hidden_dim: 2048
-    #   num_heads: 8
+    #   sample_rate: 16000
+    #   n_fft: 512
+    #   win_length: 400
+    #   hop_length: 160
+    #   num_mels: 80
+    #   encoder_hidden_dim: 256
+    #   encoder_ffn_expansion: 4
+    #   encoder_blocks_per_stage: [2, 2, 2, 2]
+    #   encoder_kernel_sizes: [5, 9, 11, 11]
+    #   fusion_ffn_dim: 4096
+    #   fusion_num_heads: 8
+    #   fusion_strategy: hybrid
     #   dropout: 0.1
 
     audio_decoder:
