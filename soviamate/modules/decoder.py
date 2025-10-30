@@ -255,7 +255,7 @@ class TextDecoder(nn.Module):
 
     def forward(
         self, encoder_outputs: torch.Tensor, encoder_lengths: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass for the text decoder.
 
         Args:
@@ -285,10 +285,9 @@ class TextDecoder(nn.Module):
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
             xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
 
-        features = xs  # (B, T, d_model) - for RNN-T joint network
-        logits = self.projector(xs)  # (B, T, vocab_size) - for CTC
+        xs = self.projector(xs)
 
-        return features, logits, x_lens
+        return xs, x_lens
 
     @torch.jit.export
     def infer(self, segments: torch.Tensor, caches: None | List[List[torch.Tensor]]):

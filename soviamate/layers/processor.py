@@ -203,6 +203,141 @@ class InverseSpectrogramProcessor(nn.Module):
         return waveforms, lengths
 
 
+class SpecAugmentProcessor(nn.Module):
+    r"""SpecAugment-style masking for hidden representations.
+
+    Applies time and hidden dimension masking to learned features
+    in a batched manner without Python for loops over samples.
+
+    Args:
+        time_mask_param (float): Ratio of sequence length to mask (e.g., 0.05 = 5%). Default 0.05.
+        freq_mask_param (float): Ratio of hidden dimension to mask. Default 0.0 (disabled).
+        num_time_masks (int): Number of time masks per sample. Default 10.
+        num_freq_masks (int): Number of hidden dimension masks per sample. Default 0 (disabled).
+        mask_value (float): Value to fill masked regions. Default 0.0.
+    """
+
+    def __init__(
+        self,
+        time_mask_param: float = 0.05,
+        freq_mask_param: float = 0.0,
+        num_time_masks: int = 5,
+        num_freq_masks: int = 0,
+        mask_value: float = 0.0,
+    ):
+        super().__init__()
+        self.time_mask_param = time_mask_param
+        self.freq_mask_param = freq_mask_param
+        self.num_time_masks = num_time_masks
+        self.num_freq_masks = num_freq_masks
+        self.mask_value = mask_value
+
+    def forward(
+        self, features: torch.Tensor, lengths: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        r"""Apply feature masking to hidden representations.
+
+        Args:
+            features (Tensor): Hidden features with shape `(B, T, D)`.
+            lengths (Tensor, optional): Actual sequence lengths with shape `(B,)`.
+                If None, all sequences assumed to have length T.
+
+        Returns:
+            Tensor: Masked features with shape `(B, T, D)`.
+        """
+        batch_size, time_steps, _ = features.shape
+        device = features.device
+
+        # Set default lengths if not provided
+        if lengths is None:
+            lengths = torch.full(
+                (batch_size,), time_steps, dtype=torch.long, device=device
+            )
+
+        # Apply feature masking (vectorized)
+        features = self._apply_freq_mask(features)
+
+        # Apply time masking (vectorized)
+        features = self._apply_time_mask(features, lengths)
+
+        return features
+
+    def _apply_freq_mask(self, features: torch.Tensor) -> torch.Tensor:
+        r"""Apply hidden dimension masking in a vectorized manner.
+
+        Args:
+            features (Tensor): Input tensor with shape `(B, T, D)`.
+
+        Returns:
+            Tensor: Features with hidden dimension masks applied.
+        """
+        batch_size, _, hidden_dim = features.shape
+        device = features.device
+
+        for _ in range(self.num_freq_masks):
+            # Calculate max mask width as ratio of hidden dimension
+            max_mask_width = max(1, int(hidden_dim * self.freq_mask_param))
+
+            # Generate random mask widths for all samples (batch_size,)
+            mask_width = (torch.rand(batch_size, device=device) * max_mask_width).long()
+
+            # Generate random start positions ensuring start + width <= hidden_dim
+            max_start = (hidden_dim - mask_width).clamp(min=0)
+            mask_start = (torch.rand(batch_size, device=device) * max_start).long()
+
+            # Create feature mask using broadcasting
+            feat_indices = torch.arange(hidden_dim, device=device)[None, None, :]
+
+            # Mask condition: mask_start <= feat_idx < mask_start + mask_width
+            mask = (feat_indices >= mask_start[:, None, None]) & (
+                feat_indices < (mask_start + mask_width)[:, None, None]
+            )
+
+            # Apply mask (vectorized across entire batch)
+            features = torch.where(mask, self.mask_value, features)
+
+        return features
+
+    def _apply_time_mask(
+        self, features: torch.Tensor, lengths: torch.Tensor
+    ) -> torch.Tensor:
+        r"""Apply time masking in a vectorized manner.
+
+        Args:
+            features (Tensor): Input tensor with shape `(B, T, D)`.
+            lengths (Tensor): Actual sequence lengths with shape `(B,)`.
+
+        Returns:
+            Tensor: Features with time masks applied.
+        """
+        batch_size, time_steps, _ = features.shape
+        device = features.device
+
+        for _ in range(self.num_time_masks):
+            # Calculate max mask width as ratio of each sequence length
+            max_mask_width = (lengths * self.time_mask_param).long().clamp(min=1)
+
+            # Generate random mask widths (batch_size,)
+            mask_width = (torch.rand(batch_size, device=device) * max_mask_width).long()
+
+            # Generate random start positions (batch_size,)
+            max_start = (lengths - mask_width).clamp(min=0)
+            mask_start = (torch.rand(batch_size, device=device) * max_start).long()
+
+            # Create time mask using broadcasting
+            time_indices = torch.arange(time_steps, device=device)[None, :, None]
+
+            # Mask condition: mask_start <= time_idx < mask_start + mask_width
+            mask = (time_indices >= mask_start[:, None, None]) & (
+                time_indices < (mask_start + mask_width)[:, None, None]
+            )
+
+            # Apply mask (vectorized across entire batch)
+            features = torch.where(mask, self.mask_value, features)
+
+        return features
+
+
 class AudioChunkProcessor(nn.Module):
     """Audio chunk processor for streaming applications.
 
@@ -277,7 +412,6 @@ class AudioChunkProcessor(nn.Module):
             torch.Tensor: Reconstructed audio from chunk-based processing.
             torch.Tensor (optional): Reconstructed audio from full processing if return_full is True.
         """
-        batch_size = audio.size(0)
         audio_length = audio.size(-1)
 
         # Chunk-based streaming

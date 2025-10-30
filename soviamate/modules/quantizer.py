@@ -14,7 +14,7 @@
 
 """Vector and Scalar Quantization"""
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -74,11 +74,14 @@ class FiniteScalarQuantization(nn.Module):
 
         return qx
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, inputs: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass of the quantizer.
 
         Args:
             inputs (Tensor): input tensor, shape (B, T, D).
+            lengths (Tensor): lengths of the input tensor, shape (B,).
 
         Returns:
             Tensor: quantized tensor, shape (B, T, D).
@@ -94,7 +97,7 @@ class FiniteScalarQuantization(nn.Module):
 
         outputs = self.proj_output(codes)
 
-        return outputs
+        return outputs, lengths
 
     @torch.jit.export
     def encode(self, inputs: torch.Tensor) -> torch.Tensor:

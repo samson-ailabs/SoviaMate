@@ -16,13 +16,11 @@
 
 from typing import List
 
-import k2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as T
 
-from soviamate.layers.recognizer import Joint, Predictor
 from soviamate.utils.helper import make_padding_mask
 
 
@@ -214,133 +212,36 @@ class MelSpectralEnergyLoss(nn.Module):
 
 
 class SequenceToSequenceLoss(nn.Module):
-    r"""Integrate CTC and pruned RNN-T loss for training sequence-to-sequence models.
+    r"""Loss function for sequence-to-sequence models.
 
     Args:
-        embedding_dim (int): dimension of the embedding layer.
-        encoder_dim (int): dimension of the encoder outputs.
-        predictor_dim (int): dimension of the predictor outputs.
-        joint_dim (int): dimension of the joint outputs.
-        context_size (int): size of the context window.
-        vocab_size (int): size of the vocabulary.
-        dropout (float): dropout probability.
-        s_range (int): pruning window size for RNN-T.
+        vocab_size (int): Size of the vocabulary.
+        blank (int, optional): Index of the blank token. Default: 0.
+        zero_infinity (bool, optional): Whether to zero infinite losses. Default: True.
     """
 
-    def __init__(
-        self,
-        embedding_dim: int,
-        encoder_dim: int,
-        predictor_dim: int,
-        joint_dim: int,
-        context_size: int,
-        vocab_size: int,
-        dropout: float,
-        s_range: int,
-    ) -> None:
+    def __init__(self, blank: int = 0, zero_infinity: bool = True) -> None:
         super().__init__()
-        self.blank = 0
-        self.s_range = s_range
-
-        # Define predictor and joint networks for RNN-T
-        self.predictor = Predictor(
-            embedding_dim, predictor_dim, vocab_size, context_size, dropout
-        )
-        self.joint = Joint(encoder_dim, predictor_dim, joint_dim, vocab_size)
-
-        # Project encoder and predictor for pruning steps
-        self.simple_am_project = nn.Linear(encoder_dim, vocab_size)
-        self.simple_lm_project = nn.Linear(predictor_dim, vocab_size)
-
-        self.ctc_loss = nn.CTCLoss(blank=self.blank, zero_infinity=True)
+        self.ctc_loss = nn.CTCLoss(blank=blank, zero_infinity=zero_infinity)
 
     def forward(
         self,
-        encoder_outputs: torch.Tensor,
-        encoder_lengths: torch.Tensor,
-        decoder_outputs: torch.Tensor,
-        decoder_lengths: torch.Tensor,
-        target_tokens: torch.Tensor,
+        logits: torch.Tensor,
+        logit_lengths: torch.Tensor,
+        targets: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> torch.Tensor:
-        r"""Compute the sequence-to-sequence loss.
+        r"""Compute the sequence-to-sequence loss using CTC loss.
 
         Args:
-            encoder_outputs (Tensor): encoder outputs, shape `(B, T, D)`.
-            encoder_lengths (Tensor): lengths of the encoder outputs, shape `(B,)`.
-            decoder_outputs (Tensor): decoder outputs, shape `(B, T, D)`.
-            decoder_lengths (Tensor): lengths of the decoder outputs, shape `(B,)`.
-            target_tokens (Tensor): target sequences, shape `(B, U)`.
-            target_lengths (Tensor): lengths of the target sequences, shape `(B,)`.
+            logits (Tensor): Decoder logits with shape `(B, T, vocab_size)`.
+            logit_lengths (Tensor): Lengths of decoder outputs with shape `(B,)`.
+            targets (Tensor): Target token sequences with shape `(B, U)`.
+            target_lengths (Tensor): Lengths of target sequences with shape `(B,)`.
 
         Returns:
-            Tensor: combined loss of CTC and RNN-T.
+            Tensor: Loss value (scalar).
         """
-        # Compute CTC loss
-        log_probs = decoder_outputs.permute(1, 0, 2)
-        log_probs = F.log_softmax(log_probs, dim=2)
-
-        ctc_loss = self.ctc_loss(
-            log_probs, target_tokens, decoder_lengths, target_lengths
-        )
-
-        # Compute pruned RNN-T loss
-        predictor_outputs, _ = self.predictor(target_tokens, target_lengths)
-
-        # Create boundary tensor for pruned RNN-T
-        boundary = torch.zeros(
-            (encoder_outputs.size(0), 4),
-            dtype=torch.int64,
-            device=encoder_outputs.device,
-        )
-        boundary[:, 2] = target_lengths
-        boundary[:, 3] = encoder_lengths
-
-        with torch.amp.autocast(device_type="cuda", enabled=False):
-            # Ensure float32 for k2 operations
-            encoder_outputs = encoder_outputs.float()
-            predictor_outputs = predictor_outputs.float()
-
-            # Project encoder and predictor outputs
-            am = self.simple_am_project(encoder_outputs)
-            lm = self.simple_lm_project(predictor_outputs)
-
-            # Stage 1: Compute simple loss to get gradients for pruning
-            simple_loss, (px_grad, py_grad) = k2.rnnt_loss_simple(
-                lm=lm,
-                am=am,
-                symbols=target_tokens,
-                termination_symbol=self.blank,
-                boundary=boundary,
-                return_grad=True,
-            )
-
-            # Stage 2: Get pruning ranges from gradients
-            ranges = k2.get_rnnt_prune_ranges(
-                px_grad=px_grad,
-                py_grad=py_grad,
-                boundary=boundary,
-                s_range=self.s_range,
-            )
-
-            # Stage 3: Prune encoder and predictor outputs
-            am_pruned, lm_pruned = k2.do_rnnt_pruning(
-                am=encoder_outputs, lm=predictor_outputs, ranges=ranges
-            )
-
-            # Stage 4: Combine pruned outputs
-            logits = self.joint(am_pruned, lm_pruned)
-
-            # Stage 5: Compute final pruned loss
-            rnnt_loss = k2.rnnt_loss_pruned(
-                logits=logits,
-                symbols=target_tokens,
-                ranges=ranges,
-                termination_symbol=self.blank,
-                boundary=boundary,
-            )
-
-        # Step 3: Combine CTC and RNN-T losses
-        loss = 1.0 * ctc_loss + 1.0 * rnnt_loss + 0.5 * simple_loss
-
+        log_probs = F.log_softmax(logits.permute(1, 0, 2), dim=2)
+        loss = self.ctc_loss(log_probs, targets, logit_lengths, target_lengths)
         return loss

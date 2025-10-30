@@ -62,6 +62,14 @@ task:
       dropout: 0.1
       contexts: *contexts
 
+    spec_augment:
+      _target_: soviamate.layers.processor.SpecAugmentProcessor
+      time_mask_param: 0.05
+      freq_mask_param: 0.0
+      num_time_masks: 5
+      num_freq_masks: 0
+      mask_value: 0.0
+
     text_decoder:
       _target_: soviamate.modules.decoder.TextDecoder
       output_dim: *vocab_size
@@ -125,14 +133,7 @@ task:
 
     text_loss:
       _target_: soviamate.modules.criterion.SequenceToSequenceLoss
-      embedding_dim: 512
-      encoder_dim: *d_model
-      predictor_dim: 512
-      joint_dim: 512
-      context_size: 8
-      vocab_size: *vocab_size
-      dropout: 0.1
-      s_range: 7
+      zero_infinity: true
 
   optim:
     total_steps: &total_steps 1000000  # (32M samples / (16 batch size * 8 gpus) * 4 epochs)
