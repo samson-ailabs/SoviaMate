@@ -104,91 +104,83 @@ class AudioCodecTask(L.LightningModule):
 
     def forward(
         self,
-        audio_inputs: torch.Tensor,
-        audio_input_lengths: torch.Tensor,
-        audio_target_lengths: torch.Tensor | None = None,
-        speaker_prompts: torch.Tensor | None = None,
-        speaker_prompt_lengths: torch.Tensor | None = None,
+        source_audios: torch.Tensor,
+        source_lengths: torch.Tensor,
+        target_lengths: torch.Tensor | None = None,
+        prompt_audios: torch.Tensor | None = None,
+        prompt_lengths: torch.Tensor | None = None,
         apply_spec_augment: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        # Encode audio
-        audio_encoder_outputs, audio_encoder_lengths = self.audio_encoder(
-            audio_inputs, audio_input_lengths
+        # Encode audio (shared encoder for both audio codec and ASR)
+        encoder_features, encoder_lengths = self.audio_encoder(
+            source_audios, source_lengths
         )
 
-        # ASR decoder branch
-        text_outputs = None
-        text_output_lengths = None
+        # ASR branch (text recognition)
+        output_tokens = None
+        output_token_lengths = None
 
         if self.text_decoder is not None:
-            # Apply SpecAugment only for ASR branch
-            text_encoder_features = audio_encoder_outputs
-            text_encoder_lengths = audio_encoder_lengths
-
-            if apply_spec_augment and self.spec_augment is not None:
-                text_encoder_features = self.spec_augment(
-                    text_encoder_features, text_encoder_lengths
-                )
-
-            text_outputs, text_output_lengths = self.text_decoder(
-                text_encoder_features, text_encoder_lengths
+            asr_features = (
+                self.spec_augment(encoder_features, encoder_lengths)
+                if apply_spec_augment and self.spec_augment is not None
+                else encoder_features
             )
 
-        # Quantize clean audio features (no augmentation)
-        audio_quantized_outputs, audio_quantized_lengths = self.audio_quantizer(
-            audio_encoder_outputs, audio_encoder_lengths
+            output_tokens, output_token_lengths = self.text_decoder(
+                asr_features, encoder_lengths
+            )
+
+        # Audio codec branch (restoration)
+        quantized_features, quantized_lengths = self.audio_quantizer(
+            encoder_features, encoder_lengths
         )
 
-        # Speaker adaptation after quantization
-        if self.speaker_adapter is not None and speaker_prompts is not None:
-            audio_quantized_outputs, audio_quantized_lengths = self.speaker_adapter(
-                audio_quantized_outputs,
-                audio_quantized_lengths,
-                speaker_prompts,
-                speaker_prompt_lengths,
+        # Speaker adaptation
+        if self.speaker_adapter is not None and prompt_audios is not None:
+            quantized_features, quantized_lengths = self.speaker_adapter(
+                quantized_features,
+                quantized_lengths,
+                prompt_audios,
+                prompt_lengths,
             )
 
         # Decode to audio
-        audio_outputs, audio_output_lengths = self.audio_decoder(
-            audio_quantized_outputs, audio_quantized_lengths
+        output_audios, output_lengths = self.audio_decoder(
+            quantized_features, quantized_lengths
         )
 
-        if audio_target_lengths is not None:
-            padding = audio_target_lengths.max() - audio_outputs.size(1)
-            audio_outputs = F.pad(audio_outputs, (0, 0, 0, padding))
-            audio_output_lengths = audio_target_lengths.clone()
+        if target_lengths is not None:
+            padding = target_lengths.max() - output_audios.size(1)
+            output_audios = F.pad(output_audios, (0, 0, 0, padding))
+            output_lengths = target_lengths.clone()
 
-        return (
-            audio_outputs,
-            audio_output_lengths,
-            text_outputs,
-            text_output_lengths,
-        )
+        return output_audios, output_lengths, output_tokens, output_token_lengths
 
     def training_step(self, batch: Tuple[torch.Tensor, ...]):
         (
-            audio_inputs,
-            audio_input_lengths,
-            speaker_prompts,
-            speaker_prompt_lengths,
-            audio_targets,
-            audio_target_lengths,
-            text_targets,
-            text_target_lengths,
+            source_audios,
+            source_lengths,
+            prompt_audios,
+            prompt_lengths,
+            target_audios,
+            target_lengths,
+            target_tokens,
+            target_token_lengths,
         ) = batch
 
-        (audio_outputs, _, text_outputs, text_output_lengths) = self.forward(
-            audio_inputs,
-            audio_input_lengths,
-            audio_target_lengths,
-            speaker_prompts,
-            speaker_prompt_lengths,
+        output_audios, _, output_tokens, output_token_lengths = self.forward(
+            source_audios,
+            source_lengths,
+            target_lengths,
+            prompt_audios,
+            prompt_lengths,
             apply_spec_augment=True,
         )
 
         # Transpose to channel-first format for discriminator
-        audio_outputs = audio_outputs.transpose(1, 2)
-        audio_targets = audio_targets.transpose(1, 2)
+        output_audios = output_audios.transpose(1, 2)
+        target_audios = target_audios.transpose(1, 2)
 
         disc_optim, gen_optim = self.optimizers()
         disc_sched, gen_sched = self.lr_schedulers()
@@ -198,7 +190,7 @@ class AudioCodecTask(L.LightningModule):
 
         if random.random() < 0.5:  # Train discriminator every 50% of the time
             fake_segments, real_segments = self._get_random_segments(
-                audio_outputs, audio_targets, audio_target_lengths
+                output_audios, target_audios, target_lengths
             )
 
             fake_logits = self.discriminator(fake_segments.detach())
@@ -217,22 +209,22 @@ class AudioCodecTask(L.LightningModule):
         # Train generator
         self.toggle_optimizer(gen_optim)
 
-        audio_loss = self.audio_loss(audio_outputs, audio_targets, audio_target_lengths)
+        audio_loss = self.audio_loss(output_audios, target_audios, target_lengths)
 
         fake_segments, _ = self._get_random_segments(
-            audio_outputs, audio_targets, audio_target_lengths
+            output_audios, target_audios, target_lengths
         )
 
         fake_logits = self.discriminator(fake_segments)
         gen_loss = self.adv_loss(fake_logits)
 
         text_loss = 0.0
-        if text_outputs is not None and self.text_loss is not None:
+        if output_tokens is not None and self.text_loss is not None:
             text_loss = self.text_loss(
-                logits=text_outputs,
-                logit_lengths=text_output_lengths,
-                targets=text_targets,
-                target_lengths=text_target_lengths,
+                logits=output_tokens,
+                logit_lengths=output_token_lengths,
+                targets=target_tokens,
+                target_lengths=target_token_lengths,
             )
 
         train_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
@@ -256,44 +248,44 @@ class AudioCodecTask(L.LightningModule):
 
     def validation_step(self, batch: Tuple[torch.Tensor, ...]):
         (
-            audio_inputs,
-            audio_input_lengths,
-            speaker_prompts,
-            speaker_prompt_lengths,
-            audio_targets,
-            audio_target_lengths,
-            text_targets,
-            text_target_lengths,
+            source_audios,
+            source_lengths,
+            prompt_audios,
+            prompt_lengths,
+            target_audios,
+            target_lengths,
+            target_tokens,
+            target_token_lengths,
         ) = batch
 
-        (audio_outputs, _, text_outputs, text_output_lengths) = self.forward(
-            audio_inputs,
-            audio_input_lengths,
-            audio_target_lengths,
-            speaker_prompts,
-            speaker_prompt_lengths,
+        output_audios, _, output_tokens, output_token_lengths = self.forward(
+            source_audios,
+            source_lengths,
+            target_lengths,
+            prompt_audios,
+            prompt_lengths,
         )
 
         # Transpose to channel-first format for discriminator
-        audio_outputs = audio_outputs.transpose(1, 2)
-        audio_targets = audio_targets.transpose(1, 2)
+        output_audios = output_audios.transpose(1, 2)
+        target_audios = target_audios.transpose(1, 2)
 
-        audio_loss = self.audio_loss(audio_outputs, audio_targets, audio_target_lengths)
+        audio_loss = self.audio_loss(output_audios, target_audios, target_lengths)
 
         fake_segments, _ = self._get_random_segments(
-            audio_outputs, audio_targets, audio_target_lengths
+            output_audios, target_audios, target_lengths
         )
 
         fake_logits = self.discriminator(fake_segments)
         gen_loss = self.adv_loss(fake_logits)
 
         text_loss = 0.0
-        if text_outputs is not None and self.text_loss is not None:
+        if output_tokens is not None and self.text_loss is not None:
             text_loss = self.text_loss(
-                logits=text_outputs,
-                logit_lengths=text_output_lengths,
-                targets=text_targets,
-                target_lengths=text_target_lengths,
+                logits=output_tokens,
+                logit_lengths=output_token_lengths,
+                targets=target_tokens,
+                target_lengths=target_token_lengths,
             )
 
         val_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
@@ -307,21 +299,21 @@ class AudioCodecTask(L.LightningModule):
 
     def _get_random_segments(
         self,
-        decoder_outputs: torch.Tensor,
-        targets: torch.Tensor,
+        output_audios: torch.Tensor,
+        target_audios: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract random segments from decoder outputs and targets for discriminator.
+        """Extract random segments from output and target audios for discriminator.
 
         Args:
-            decoder_outputs: Decoder outputs with shape (B, C, T).
-            targets: Target audio with shape (B, C, T).
+            output_audios: Model output audios with shape (B, C, T).
+            target_audios: Target audios with shape (B, C, T).
             target_lengths: Lengths of targets with shape (B,).
 
         Returns:
-            Tuple of (decoder_segments, target_segments) with shape (B, C, SEGMENT_SIZE).
+            Tuple of (output_segments, target_segments) with shape (B, C, SEGMENT_SIZE).
         """
-        batch_size, num_channels, _ = decoder_outputs.size()
+        batch_size, num_channels, _ = output_audios.size()
         max_start_index = target_lengths - SEGMENT_SIZE
 
         start_indices = torch.rand([batch_size], device=self.device)
@@ -338,10 +330,10 @@ class AudioCodecTask(L.LightningModule):
 
         time_indices = start_indices.unsqueeze(1).unsqueeze(2) + time_offsets
 
-        decoder_segments = decoder_outputs[batch_indices, channel_indices, time_indices]
-        target_segments = targets[batch_indices, channel_indices, time_indices]
+        output_segments = output_audios[batch_indices, channel_indices, time_indices]
+        target_segments = target_audios[batch_indices, channel_indices, time_indices]
 
-        return decoder_segments, target_segments
+        return output_segments, target_segments
 
     def configure_optimizers(self):
         disc_optim = instantiate(
