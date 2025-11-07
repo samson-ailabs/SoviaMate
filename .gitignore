@@ -178,3 +178,6 @@ lightning_logs/
 
 # Data files and training datasets
 data/
+
+# Checkpoints for model weights
+checkpoints/

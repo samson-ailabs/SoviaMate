@@ -20,6 +20,7 @@ from typing import Tuple
 
 import lightning as L
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 import torch
 import torch.nn.functional as F
@@ -374,3 +375,35 @@ class AudioCodecTask(L.LightningModule):
             {"scheduler": disc_sched, "interval": "step"},
             {"scheduler": gen_sched, "interval": "step"},
         ]
+
+    def export_model(self, filepath: str) -> None:
+        """Export model for production using AudioCodecBundle.
+
+        This method saves only the production-relevant components (encoder, quantizer,
+        decoder, and optional text_decoder/speaker_adapter) along with hyperparameters.
+        Training-only components (discriminator, losses, spec_augment) are excluded.
+
+        Args:
+            filepath: Path where to save the checkpoint.
+        """
+        # Build state dict with nested structure
+        state_dict = {
+            "audio_encoder": self.audio_encoder.state_dict(),
+            "audio_quantizer": self.audio_quantizer.state_dict(),
+            "audio_decoder": self.audio_decoder.state_dict(),
+        }
+
+        # Optional components
+        if self.text_decoder is not None:
+            state_dict["text_decoder"] = self.text_decoder.state_dict()
+
+        if self.speaker_adapter is not None:
+            state_dict["speaker_adapter"] = self.speaker_adapter.state_dict()
+
+        # Create checkpoint with model components and hyperparameters
+        hparams = OmegaConf.to_container(self.hparams.model, resolve=True)
+        checkpoint = {"state_dict": state_dict, "hyper_parameters": hparams}
+
+        # Save checkpoint
+        torch.save(checkpoint, filepath)
+        print(f"Exported model checkpoint to: {filepath}")

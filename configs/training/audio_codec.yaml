@@ -1,5 +1,5 @@
 task:
-  _target_: soviamate.tasks.restoration.AudioCodecTask
+  _target_: soviamate.tasks.conversion.AudioCodecTask
 
   data:
     tokenizer: &tokenizer
