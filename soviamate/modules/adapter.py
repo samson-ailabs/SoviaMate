@@ -38,46 +38,42 @@ class SpeakerAdapter(nn.Module):
 
     Args:
         input_dim: Dimension of input features to adapt (from codec).
-        sample_rate: Audio sample rate in Hz. Default: 16000.
-        n_fft: FFT size for spectrogram. Default: 512.
-        win_length: STFT window length. Default: 400.
-        hop_length: STFT hop length. Default: 160.
-        num_mels: Number of mel frequency bins. Default: 80.
-        encoder_hidden_dim: Hidden dimension of encoder. Default: 256.
-        encoder_ffn_expansion: FFN expansion factor in encoder. Default: 4.
-        encoder_blocks_per_stage: Number of LST blocks per stage. Default: (2, 2, 2, 2).
-        encoder_kernel_sizes: Kernel sizes for encoder convolutions. Default: (5, 9, 11, 11).
-        fusion_ffn_dim: FFN hidden dimension for fusion refinement. Default: 1024.
-        fusion_num_heads: Number of attention heads for fusion. Default: 4.
-        fusion_strategy: Fusion strategy ("global", "local", "hybrid"). Default: "hybrid".
-        dropout: Dropout probability for all layers. Default: 0.1.
+        sample_rate: Audio sample rate in Hz.
+        n_fft: FFT size for spectrogram.
+        win_length: STFT window length.
+        hop_length: STFT hop length.
+        num_mels: Number of mel frequency bins.
+        encoder_hidden_dim: Hidden dimension of encoder.
+        encoder_ffn_expansion: FFN expansion factor in encoder.
+        encoder_blocks_per_stage: Number of LST blocks per stage.
+        encoder_kernel_sizes: Kernel sizes for encoder convolutions.
+        fusion_ffn_dim: FFN hidden dimension for fusion refinement.
+        fusion_num_heads: Number of attention heads for fusion.
+        fusion_strategy: Fusion strategy ("global", "local", "hybrid").
+        dropout: Dropout probability for all layers.
     """
 
     def __init__(
         self,
         input_dim: int,
-        sample_rate: int = 16000,
-        n_fft: int = 512,
-        win_length: int = 400,
-        hop_length: int = 160,
-        num_mels: int = 80,
-        encoder_hidden_dim: int = 256,
-        encoder_ffn_expansion: int = 4,
-        encoder_blocks_per_stage: List[int] = (2, 2, 2, 2),
-        encoder_kernel_sizes: List[int] = (5, 9, 11, 11),
-        fusion_ffn_dim: int = 1024,
-        fusion_num_heads: int = 4,
-        fusion_strategy: Literal["global", "local", "hybrid"] = "hybrid",
-        dropout: float = 0.1,
+        sample_rate: int,
+        n_fft: int,
+        win_length: int,
+        hop_length: int,
+        num_mels: int,
+        encoder_hidden_dim: int,
+        encoder_ffn_expansion: int,
+        encoder_blocks_per_stage: List[int],
+        encoder_kernel_sizes: List[int],
+        fusion_ffn_dim: int,
+        fusion_num_heads: int,
+        fusion_strategy: Literal["global", "local", "hybrid"],
+        dropout: float,
     ):
         super().__init__()
 
         self.hop_length = hop_length
         self.fusion_strategy = fusion_strategy
-
-        # ============================================================
-        # Encoding Components (Res2Former architecture)
-        # ============================================================
 
         # Mel-spectrogram frontend
         self.mel_transform = TAudio.MelSpectrogram(
@@ -126,22 +122,18 @@ class SpeakerAdapter(nn.Module):
 
         # Attentive pooling for utterance-level embeddings
         self.attentive_pooling = AttentiveStatisticsPooling(
-            encoder_hidden_dim, input_dim
+            encoder_hidden_dim, encoder_hidden_dim
         )
 
-        # Frame projection to output dimension
-        self.frame_projection = nn.Sequential(
-            nn.Linear(encoder_hidden_dim, input_dim),
-            nn.LayerNorm(input_dim),
-        )
-
-        # ============================================================
-        # Speaker Fusion Components
-        # ============================================================
+        # # Frame projection to output dimension
+        # self.frame_projection = nn.Sequential(
+        #     nn.Linear(encoder_hidden_dim, input_dim),
+        #     nn.LayerNorm(input_dim),
+        # )
 
         # Utterance-level fusion (FiLM affine transformation)
         if fusion_strategy in ["global", "hybrid"]:
-            self.film_projection = nn.Linear(input_dim, input_dim * 2)
+            self.film_projection = nn.Linear(encoder_hidden_dim, input_dim * 2)
             nn.init.zeros_(self.film_projection.weight)
             nn.init.zeros_(self.film_projection.bias)
 
@@ -151,20 +143,22 @@ class SpeakerAdapter(nn.Module):
             self.cross_attn = nn.MultiheadAttention(
                 embed_dim=input_dim,
                 num_heads=fusion_num_heads,
+                kdim=encoder_hidden_dim,
+                vdim=encoder_hidden_dim,
                 dropout=dropout,
                 batch_first=True,
             )
             self.attn_dropout = nn.Dropout(dropout)
 
-        # Feature refinement (applied to all strategies)
-        self.norm_ffn = nn.LayerNorm(input_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(input_dim, fusion_ffn_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(fusion_ffn_dim, input_dim),
-            nn.Dropout(dropout),
-        )
+        # # Feature refinement (applied to all strategies)
+        # self.norm_ffn = nn.LayerNorm(input_dim)
+        # self.ffn = nn.Sequential(
+        #     nn.Linear(input_dim, fusion_ffn_dim),
+        #     nn.SiLU(),
+        #     nn.Dropout(dropout),
+        #     nn.Linear(fusion_ffn_dim, input_dim),
+        #     nn.Dropout(dropout),
+        # )
 
     def encode_speaker(
         self, waveforms: torch.Tensor, lengths: Optional[torch.Tensor] = None
@@ -217,13 +211,11 @@ class SpeakerAdapter(nn.Module):
         # Aggregate all stage outputs
         stage_sum = sum(taff_outputs)
 
-        # Apply encoder head and transpose
-        x = stage_sum.transpose(1, 2)
-        x = self.encoder_head(x)
+        # Extract frame-level embeddings
+        frame_embeddings = self.encoder_head(stage_sum.transpose(1, 2))
 
-        # Extract utterance-level and frame-level embeddings
-        utterance_embeddings = self.attentive_pooling(x, frame_lengths)
-        frame_embeddings = self.frame_projection(x)
+        # Extract utterance-level embeddings
+        utterance_embeddings = self.attentive_pooling(frame_embeddings, frame_lengths)
 
         return utterance_embeddings, frame_embeddings, frame_lengths
 
@@ -252,10 +244,6 @@ class SpeakerAdapter(nn.Module):
         query_mask = make_padding_mask(x_lengths)
         key_mask = make_padding_mask(frame_lengths)
 
-        # ============================================================
-        # Utterance-level fusion (FiLM affine transformation)
-        # ============================================================
-
         if self.fusion_strategy in ["global", "hybrid"]:
             # Project to scale and shift parameters
             gamma, beta = torch.chunk(
@@ -264,10 +252,6 @@ class SpeakerAdapter(nn.Module):
 
             # Apply affine transformation: (1 + γ) * x + β
             x = (1.0 + gamma.unsqueeze(1)) * x + beta.unsqueeze(1)
-
-        # ============================================================
-        # Frame-level fusion (cross-attention temporal alignment)
-        # ============================================================
 
         if self.fusion_strategy in ["local", "hybrid"]:
             # Pre-normalization
@@ -290,19 +274,15 @@ class SpeakerAdapter(nn.Module):
 
             x = x + attn_output
 
-        # ============================================================
-        # Feature refinement (applied to all strategies)
-        # ============================================================
+        # ffn_input = self.norm_ffn(x)
+        # ffn_output = self.ffn(ffn_input)
 
-        ffn_input = self.norm_ffn(x)
-        ffn_output = self.ffn(ffn_input)
+        # # Mask padding positions before residual
+        # if query_mask is not None:
+        #     ffn_output = ffn_output.masked_fill(query_mask.unsqueeze(-1), 0.0)
 
-        # Mask padding positions before residual
-        if query_mask is not None:
-            ffn_output = ffn_output.masked_fill(query_mask.unsqueeze(-1), 0.0)
-
-        # Residual connection
-        x = x + ffn_output
+        # # Residual connection
+        # x = x + ffn_output
 
         return x, x_lengths
 
