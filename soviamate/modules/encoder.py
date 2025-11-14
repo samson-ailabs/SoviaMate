@@ -51,6 +51,8 @@ class AudioEncoder(nn.Module):
         kernel_size: int,
         dropout: int,
         contexts: List[Tuple[int, int]],
+        use_cross_attn: bool = False,
+        cross_attn_dim: int = 256,
     ):
         super().__init__()
 
@@ -70,6 +72,7 @@ class AudioEncoder(nn.Module):
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.attn_contexts = contexts
+        self.use_cross_attn = use_cross_attn
 
         self.specgram = SpectrogramProcessor(
             window_size=window_size, output_dim=d_model, hop_length_ratio=4
@@ -77,17 +80,33 @@ class AudioEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                ConformerLayer(d_model, ffn_dim, num_heads, kernel_size, dropout)
+                ConformerLayer(
+                    d_model,
+                    ffn_dim,
+                    num_heads,
+                    kernel_size,
+                    dropout,
+                    use_cross_attn,
+                    cross_attn_dim,
+                )
                 for _ in range(num_layers)
             ]
         )
 
-    def forward(self, waveforms: torch.Tensor, lengths: torch.Tensor):
+    def forward(
+        self,
+        waveforms: torch.Tensor,
+        lengths: torch.Tensor,
+        prompts: torch.Tensor = None,
+        prompt_lengths: torch.Tensor = None,
+    ):
         r"""Forward pass of the audio encoder.
 
         Args:
             waveforms (Tensor): input tensor with shape `(B, T, 1)`.
             lengths (Tensor): length of the input tensor.
+            prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
+            prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
 
         Returns:
             Tensor: output tensor with shape `(B, T // window_size, D)`.
@@ -107,19 +126,34 @@ class AudioEncoder(nn.Module):
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
 
+        prompt_mask = None
+        if self.use_cross_attn and prompts is not None:
+            prompt_mask = make_padding_mask(prompt_lengths)
+
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
-            xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
+            xs, _, _ = layer(
+                xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
+            )
 
         return xs, x_lens
 
     @torch.jit.export
-    def infer(self, segments: torch.Tensor, caches: None | List[List[torch.Tensor]]):
+    def infer(
+        self,
+        segments: torch.Tensor,
+        caches: List[List[torch.Tensor]] = None,
+        prompts: torch.Tensor = None,
+        prompt_lengths: torch.Tensor = None,
+    ):
         r"""Inference for streaming audio input.
 
         Args:
             segment (Tensor): input tensor with shape `(B, chunk_size, 1)`.
             caches (List[List[Tensor]]): list of lists of tensors representing
                 internal state for each convolution and attention module.
+            prompts (Tensor, optional): pre-computed prompt features with shape `(B, T_prompt, D_prompt)`.
+                Should be computed once and reused for all chunks.
+            prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
 
         Returns:
             Tuple[Tensor, List[List[Tensor]]]:
@@ -150,10 +184,14 @@ class AudioEncoder(nn.Module):
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, self.chunk_size, self.left_context)
 
+        prompt_mask = None
+        if self.use_cross_attn and prompts is not None:
+            prompt_mask = make_padding_mask(prompt_lengths)
+
         new_caches = []
-        for layer, cache in zip(self.layers, caches):
+        for layer, (conv_cache, attn_cache) in zip(self.layers, caches):
             xs, conv_cache, attn_cache = layer(
-                xs, conv_mask, attn_mask, cache[0], cache[1]
+                xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
             )
             new_caches.append([conv_cache, attn_cache])
 

@@ -18,10 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-EPS_NORM = 1e-2
 
-
-class _SelfAttentionModule(nn.Module):
+class SelfAttentionModule(nn.Module):
     r"""Chunk-based self attention module.
 
     Args:
@@ -34,7 +32,7 @@ class _SelfAttentionModule(nn.Module):
         super().__init__()
         self.num_heads = num_heads
 
-        self.layer_norm = nn.LayerNorm(input_dim, eps=EPS_NORM)
+        self.layer_norm = nn.LayerNorm(input_dim)
         self.attention = nn.MultiheadAttention(
             input_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -83,7 +81,69 @@ class _SelfAttentionModule(nn.Module):
         return x, cache
 
 
-class _ConvolutionModule(nn.Module):
+class CrossAttentionModule(nn.Module):
+    r"""Position-agnostic cross-attention module for external conditioning.
+
+    Args:
+        input_dim (int): input dimension.
+        num_heads (int): number of attention heads.
+        attn_dim (int): dimension of cross-attention keys/values.
+        dropout (float): dropout probability.
+    """
+
+    def __init__(
+        self, input_dim: int, num_heads: int, attn_dim: int, dropout: float
+    ) -> None:
+        super().__init__()
+
+        self.layer_norm = nn.LayerNorm(input_dim)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=num_heads,
+            kdim=attn_dim,
+            vdim=attn_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        prompts: torch.Tensor,
+        padding_masks: torch.Tensor = None,
+        prompt_masks: torch.Tensor = None,
+    ) -> torch.Tensor:
+        r"""Apply position-agnostic cross-attention.
+
+        Args:
+            inputs (torch.Tensor): input tensor with shape `(B, T, D)`.
+            prompts (torch.Tensor): prompt features with shape `(B, T', D')`.
+            padding_masks (torch.Tensor, optional): padding mask for inputs with shape `(B, T)`.
+            prompt_masks (torch.Tensor, optional): padding mask for prompts with shape `(B, T')`.
+
+        Returns:
+            torch.Tensor: output tensor with shape `(B, T, D)`.
+        """
+        queries = self.layer_norm(inputs)
+
+        x, _ = self.attention(
+            query=queries,
+            key=prompts,
+            value=prompts,
+            key_padding_mask=prompt_masks,
+            need_weights=False,
+        )
+
+        x = self.dropout(x)
+
+        if padding_masks is not None:
+            x = x.masked_fill(padding_masks.unsqueeze(-1), 0.0)
+
+        return x
+
+
+class ConvolutionModule(nn.Module):
     r"""Causal convolution module.
 
     Args:
@@ -100,14 +160,14 @@ class _ConvolutionModule(nn.Module):
 
         self.left_context = kernel_size - 1
 
-        self.layer_norm1 = nn.InstanceNorm1d(input_dim, eps=EPS_NORM)
+        self.layer_norm1 = nn.InstanceNorm1d(input_dim)
         self.pointwise_conv1 = nn.Conv1d(input_dim, input_dim, 1)
         self.activation1 = nn.GELU()
         self.depthwise_conv = nn.Conv1d(
             input_dim, input_dim, kernel_size, groups=input_dim
         )
 
-        self.layer_norm2 = nn.InstanceNorm1d(input_dim, eps=EPS_NORM)
+        self.layer_norm2 = nn.InstanceNorm1d(input_dim)
         self.activation2 = nn.GELU()
         self.pointwise_conv2 = nn.Conv1d(input_dim, input_dim, 1)
 
@@ -152,7 +212,7 @@ class _ConvolutionModule(nn.Module):
         return x, cache
 
 
-class _FeedForwardModule(nn.Module):
+class FeedForwardModule(nn.Module):
     r"""Feed forward module.
 
     Args:
@@ -165,7 +225,7 @@ class _FeedForwardModule(nn.Module):
         super().__init__()
 
         self.sequential = nn.Sequential(
-            nn.LayerNorm(input_dim, eps=EPS_NORM),
+            nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -192,7 +252,9 @@ class ConformerLayer(nn.Module):
         ffn_dim (int): hidden layer dimension of feedforward network.
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size of depthwise convolution layer.
-        dropout (float, optional): dropout probability. (Default: 0.0)
+        dropout (float): dropout probability.
+        use_cross_attn (bool, optional): use cross-attention module. (Default: False)
+        cross_attn_dim (int, optional): dimension of cross-attention keys/values. (Default: 256)
     """
 
     def __init__(
@@ -201,15 +263,23 @@ class ConformerLayer(nn.Module):
         ffn_dim: int,
         num_heads: int,
         kernel_size: int,
-        dropout: float = 0.0,
+        dropout: float,
+        use_cross_attn: bool = False,
+        cross_attn_dim: int = 256,
     ) -> None:
         super().__init__()
+        self.use_cross_attn = use_cross_attn
 
-        self.ffn1_module = _FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.attn_module = _SelfAttentionModule(input_dim, num_heads, dropout)
-        self.conv_module = _ConvolutionModule(input_dim, kernel_size, dropout)
-        self.ffn2_module = _FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.layer_norm = nn.LayerNorm(input_dim, eps=EPS_NORM)
+        self.ffn1_module = FeedForwardModule(input_dim, ffn_dim, dropout)
+        self.attn_module = SelfAttentionModule(input_dim, num_heads, dropout)
+        self.conv_module = ConvolutionModule(input_dim, kernel_size, dropout)
+        self.ffn2_module = FeedForwardModule(input_dim, ffn_dim, dropout)
+        self.layer_norm = nn.LayerNorm(input_dim)
+
+        if use_cross_attn:
+            self.cross_attn_module = CrossAttentionModule(
+                input_dim, num_heads, cross_attn_dim, dropout
+            )
 
     def forward(
         self,
@@ -218,6 +288,8 @@ class ConformerLayer(nn.Module):
         attn_mask: torch.Tensor,
         conv_cache: torch.Tensor,
         attn_cache: torch.Tensor,
+        prompt: torch.Tensor = None,
+        prompt_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -226,6 +298,8 @@ class ConformerLayer(nn.Module):
             attn_mask (torch.Tensor): attention mask, with shape `(T, T + left_context)`.
             conv_cache (torch.Tensor): convolution cache, with shape `(B, D, kernel_size - 1)`.
             attn_cache (torch.Tensor): attention cache, with shape `(B, left_context, D)`.
+            prompt (torch.Tensor, optional): prompt features, with shape `(B, T', D')`.
+            prompt_mask (torch.Tensor, optional): padding mask for prompts, with shape `(B, T')`.
 
         Returns:
             torch.Tensor: output, with shape `(B, T, D)`.
@@ -238,6 +312,9 @@ class ConformerLayer(nn.Module):
         residual = x
         x, attn_cache = self.attn_module(x, conv_mask, attn_mask, attn_cache)
         x = x + residual
+
+        if self.use_cross_attn and prompt is not None:
+            x = x + self.cross_attn_module(x, prompt, conv_mask, prompt_mask)
 
         residual = x
         x, conv_cache = self.conv_module(x, conv_mask, conv_cache)
