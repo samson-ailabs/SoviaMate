@@ -346,7 +346,7 @@ class MultiSpectralDiscriminator(nn.Module):
         """Forward pass of Multiple Spectral STFT Discriminator.
 
         Args:
-            x (torch.Tensor): Input waveform, shape (B, 1, T)
+            x (Tensor): Input waveform, shape (B, 1, T)
 
         Returns:
             List[torch.Tensor]: List of final logits from each sub-discriminator
@@ -384,7 +384,7 @@ class _SpectroStreamBlock(nn.Module):
         """Forward pass through the block.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W)
+            x (Tensor): Input tensor of shape (B, C, H, W)
 
         Returns:
             torch.Tensor: Output tensor after convolution and activation
@@ -447,7 +447,7 @@ class SpectroStreamDiscriminator(nn.Module):
         """Forward pass through discriminator.
 
         Args:
-            x (torch.Tensor): Input waveform, shape (B, 1, T)
+            x (Tensor): Input waveform, shape (B, 1, T)
 
         Returns:
             torch.Tensor: Discriminator logits
@@ -509,7 +509,7 @@ class MultiSpectroStreamDiscriminator(nn.Module):
         """Forward pass through multi-scale discriminator.
 
         Args:
-            x (torch.Tensor): Input waveform, shape (B, C, T)
+            x (Tensor): Input waveform, shape (B, C, T)
 
         Returns:
             torch.Tensor: Concatenated logits from all discriminator scales

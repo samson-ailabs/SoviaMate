@@ -15,7 +15,8 @@
 """Utility functions for various tasks"""
 
 import json
-from typing import Any, Dict, List, Union
+import random
+from typing import Any, Dict, List, Tuple, Union
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -107,10 +108,6 @@ def make_attention_mask(
             the corresponding input value will be ignored.
     """
 
-    assert (
-        left_context % chunk_size == 0
-    ), "left_context must be divisible by chunk_size"
-
     device = lengths.device
     dtype = lengths.dtype
 
@@ -127,3 +124,42 @@ def make_attention_mask(
     mask = torch.gt(diff, offset) | torch.lt(diff, 0)
 
     return mask
+
+
+def sample_chunk_config(
+    lengths: torch.Tensor,
+    min_chunk_size: int = 1,
+    max_chunk_size: int = -1,
+    left_context_ratio: int = 4,
+    full_context_prob: float = 0.0,
+) -> Tuple[int, int]:
+    r"""Sample chunk configuration for dynamic chunk training.
+
+    Randomly samples chunk size to enable unified streaming and non-streaming models.
+
+    Args:
+        lengths (Tensor): Sequence lengths in the batch with shape `(B,)`.
+        min_chunk_size (int): Minimum chunk size in frames. Default: 1.
+        max_chunk_size (int): Maximum chunk size. If -1, uses max length. Default: -1.
+        left_context_ratio (int): Ratio of left_context to chunk_size. Default: 4.
+        full_context_prob (float): Probability of full context mode. Default: 0.0.
+
+    Returns:
+        Tuple[int, int]: (chunk_size, left_context)
+    """
+
+    min_length = int(lengths.min().item())
+    max_length = int(lengths.max().item())
+
+    if random.random() >= full_context_prob and min_chunk_size < min_length:
+        effective_max_chunk_size = (
+            max_length if max_chunk_size < 0 else min(max_chunk_size, max_length)
+        )
+
+        chunk_size = random.randint(min_chunk_size, effective_max_chunk_size)
+        left_context = left_context_ratio * chunk_size
+
+        if chunk_size + left_context < min_length:
+            return chunk_size, left_context
+
+    return max_length, 0

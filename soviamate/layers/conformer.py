@@ -47,12 +47,12 @@ class SelfAttentionModule(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs (torch.Tensor): with shape `(B, T, D)`.
-            padding_masks (torch.Tensor): with shape `(B, T)`.
+            inputs (Tensor): with shape `(B, T, D)`.
+            padding_masks (Tensor): with shape `(B, T)`.
                 A ``True`` value indicates the corresponding key value will be ignored.
-            attention_masks (torch.Tensor): with shape `(T, T + left_context)`.
+            attention_masks (Tensor): with shape `(T, T + left_context)`.
                 A ``True`` value indicates the corresponding position is not allowed to attend.
-            contexts (torch.Tensor): with shape `(B, left_context, D)`.
+            contexts (Tensor): with shape `(B, left_context, D)`.
                 The cached left context used in the streaming self-attention mechanism.
 
         Returns:
@@ -117,8 +117,8 @@ class CrossAttentionModule(nn.Module):
         r"""Apply position-agnostic cross-attention.
 
         Args:
-            inputs (torch.Tensor): input tensor with shape `(B, T, D)`.
-            prompts (torch.Tensor): prompt features with shape `(B, T', D')`.
+            inputs (Tensor): input tensor with shape `(B, T, D)`.
+            prompts (Tensor): prompt features with shape `(B, T', D')`.
             padding_masks (torch.Tensor, optional): padding mask for inputs with shape `(B, T)`.
             prompt_masks (torch.Tensor, optional): padding mask for prompts with shape `(B, T')`.
 
@@ -178,10 +178,10 @@ class ConvolutionModule(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs (torch.Tensor): with shape `(B, T, D)`.
-            padding_masks (torch.Tensor): with shape `(B, T)`.
+            inputs (Tensor): with shape `(B, T, D)`.
+            padding_masks (Tensor): with shape `(B, T)`.
                 A ``True`` value indicates the corresponding value will be ignored.
-            contexts (torch.Tensor): with shape `(B, D, kernel_size - 1)`.
+            contexts (Tensor): with shape `(B, D, kernel_size - 1)`.
                 The cached left context used in the streaming convolution mechanism.
 
         Returns:
@@ -197,8 +197,12 @@ class ConvolutionModule(nn.Module):
         mask = padding_masks.unsqueeze(1)
         x = x.masked_fill(mask, 0.0)
 
-        x = torch.cat([contexts, x], dim=2)
-        cache = x[:, :, -self.left_context :]
+        if contexts.size(2) > 0:
+            x = torch.cat([contexts, x], dim=2)
+            cache = x[:, :, -self.left_context :]
+        else:
+            x = F.pad(x, (self.left_context, 0))
+            cache = contexts
 
         x = self.depthwise_conv(x)
         x = self.layer_norm2(x)
@@ -236,7 +240,7 @@ class FeedForwardModule(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            inputs (torch.Tensor): with shape `(*, D)`.
+            inputs (Tensor): with shape `(*, D)`.
 
         Returns:
             torch.Tensor: outputs, with shape `(*, D)`.
@@ -293,11 +297,11 @@ class ConformerLayer(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            x (torch.Tensor): input, with shape `(B, T, D)`.
-            conv_mask (torch.Tensor): convolution mask, with shape `(B, T)`.
-            attn_mask (torch.Tensor): attention mask, with shape `(T, T + left_context)`.
-            conv_cache (torch.Tensor): convolution cache, with shape `(B, D, kernel_size - 1)`.
-            attn_cache (torch.Tensor): attention cache, with shape `(B, left_context, D)`.
+            x (Tensor): input, with shape `(B, T, D)`.
+            conv_mask (Tensor): convolution mask, with shape `(B, T)`.
+            attn_mask (Tensor): attention mask, with shape `(T, T + left_context)`.
+            conv_cache (Tensor): convolution cache, with shape `(B, D, kernel_size - 1)`.
+            attn_cache (Tensor): attention cache, with shape `(B, left_context, D)`.
             prompt (torch.Tensor, optional): prompt features, with shape `(B, T', D')`.
             prompt_mask (torch.Tensor, optional): padding mask for prompts, with shape `(B, T')`.
 

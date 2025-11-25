@@ -14,20 +14,24 @@
 
 """Multimodal Encoder for audio and visual inputs"""
 
-import random
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
 from soviamate.layers.processor import SpectrogramProcessor
-from soviamate.utils.helper import make_attention_mask, make_padding_mask
+from soviamate.utils.helper import (
+    make_attention_mask,
+    make_padding_mask,
+    sample_chunk_config,
+)
 
 
 class AudioEncoder(nn.Module):
     """Audio Encoder with streaming inference capabilities.
-    Suitable for speech recognition, speaker diarization, and other speech processing tasks.
+
+    Uses dynamic chunk training for unified streaming and non-streaming models.
 
     Args:
         window_size (int): size of the window for input frames.
@@ -37,8 +41,12 @@ class AudioEncoder(nn.Module):
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size for the convolutional module.
         dropout (float): dropout probability for each module.
-        contexts (List[Tuple[int, int]]): List of tuples representing
-            segment length and left context length for streaming inference.
+        use_cross_attn (bool, optional): use cross-attention module. Default: False.
+        cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
+        min_chunk_size (int, optional): minimum chunk size for dynamic training. Default: 1.
+        max_chunk_size (int, optional): maximum chunk size for dynamic training. Default: -1.
+        left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
+        full_context_prob (float, optional): probability of full context mode. Default: 0.0.
     """
 
     def __init__(
@@ -50,29 +58,27 @@ class AudioEncoder(nn.Module):
         num_heads: int,
         kernel_size: int,
         dropout: int,
-        contexts: List[Tuple[int, int]],
         use_cross_attn: bool = False,
         cross_attn_dim: int = 256,
+        min_chunk_size: int = 1,
+        max_chunk_size: int = -1,
+        left_context_ratio: int = 4,
+        full_context_prob: float = 0.0,
     ):
         super().__init__()
 
         self.chunk_size = None
         self.left_context = None
 
-        for segment_length, left_context_length in contexts:
-            if segment_length <= 0 or left_context_length <= 0:
-                raise ValueError("The context size should be positive integers.")
-
-            if left_context_length % segment_length != 0:
-                raise ValueError(
-                    "left_context_length should be divisible by segment_length"
-                )
-
         self.window_size = window_size
         self.embed_dim = d_model
         self.kernel_size = kernel_size
-        self.attn_contexts = contexts
         self.use_cross_attn = use_cross_attn
+
+        self.min_chunk_size = min_chunk_size
+        self.max_chunk_size = max_chunk_size
+        self.left_context_ratio = left_context_ratio
+        self.full_context_prob = full_context_prob
 
         self.specgram = SpectrogramProcessor(
             window_size=window_size, output_dim=d_model, hop_length_ratio=4
@@ -102,6 +108,9 @@ class AudioEncoder(nn.Module):
     ):
         r"""Forward pass of the audio encoder.
 
+        During training, chunk sizes are randomly sampled. During inference,
+        uses streaming config if set, otherwise uses full context.
+
         Args:
             waveforms (Tensor): input tensor with shape `(B, T, 1)`.
             lengths (Tensor): length of the input tensor.
@@ -116,15 +125,25 @@ class AudioEncoder(nn.Module):
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        batch_size, device = waveforms.size(0), waveforms.device
-
-        chunk_size, left_context = random.choice(self.attn_contexts)
-        zero_caches = self._initiate_states(batch_size, left_context, device)
-
         xs, x_lens = self.specgram(waveforms, lengths)
+
+        if self.training:
+            chunk_size, left_context = sample_chunk_config(
+                x_lens,
+                self.min_chunk_size,
+                self.max_chunk_size,
+                self.left_context_ratio,
+                self.full_context_prob,
+            )
+        elif (self.chunk_size is not None) and (self.left_context is not None):
+            chunk_size, left_context = self.chunk_size, self.left_context
+        else:
+            chunk_size, left_context = xs.size(1), 0
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
+
+        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
         prompt_mask = None
         if self.use_cross_attn and prompts is not None:
@@ -198,19 +217,15 @@ class AudioEncoder(nn.Module):
         return xs, new_caches
 
     @torch.jit.export
-    def set_streaming_config(self, chunk_size: int, left_context: int):
+    def set_streaming_config(self, chunk_size: int):
         r"""Set the streaming configuration for the audio encoder.
 
         Args:
             chunk_size (int): segment length for streaming inference.
-            left_context (int): left context length for the attention module.
         """
 
-        if [chunk_size, left_context] not in self.attn_contexts:
-            raise ValueError("The size is not in the list of valid contexts.")
-
         self.chunk_size = chunk_size
-        self.left_context = left_context
+        self.left_context = chunk_size * self.left_context_ratio
 
     def _initiate_states(
         self, batch_size: int, left_context: int, device: torch.device
@@ -227,8 +242,10 @@ class AudioEncoder(nn.Module):
                 internal state for each convolution and attention module.
         """
 
+        conv_left_context = self.kernel_size - 1 if left_context > 0 else 0
+
         conv_cache = torch.zeros(
-            batch_size, self.embed_dim, self.kernel_size - 1, device=device
+            batch_size, self.embed_dim, conv_left_context, device=device
         )
         attn_cache = torch.zeros(
             batch_size, left_context, self.embed_dim, device=device

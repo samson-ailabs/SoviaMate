@@ -404,7 +404,7 @@ class AudioChunkProcessor(nn.Module):
         """Process a complete audio stream in chunks.
 
         Args:
-            audio (torch.Tensor): Input audio with shape (B, 1, T).
+            audio (Tensor): Input audio with shape (B, 1, T).
             return_full (bool, optional): Whether to return both chunk-based and
                 full processing results for comparison. Default is False.
 
@@ -444,7 +444,7 @@ class AudioChunkProcessor(nn.Module):
         """Process a single audio chunk.
 
         Args:
-            chunk (torch.Tensor): Input audio chunk with shape (B, 1, T).
+            chunk (Tensor): Input audio chunk with shape (B, 1, T).
             return_spectrogram (bool, optional): Whether to return the spectrogram
                 alongside the reconstructed audio. Default is False.
 

@@ -14,7 +14,6 @@
 
 """Multimodal Decoder for audio and visual inputs"""
 
-import random
 from typing import List, Tuple
 
 import torch
@@ -22,12 +21,17 @@ import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
 from soviamate.layers.processor import InverseSpectrogramProcessor
-from soviamate.utils.helper import make_padding_mask, make_attention_mask
+from soviamate.utils.helper import (
+    make_attention_mask,
+    make_padding_mask,
+    sample_chunk_config,
+)
 
 
 class AudioDecoder(nn.Module):
     r"""Audio Decoder with streaming inference capabilities.
-    Suitable for speech synthesis, speech enhancement, and other speech processing tasks.
+
+    Uses dynamic chunk training for unified streaming and non-streaming models.
 
     Args:
         window_size (int): window size for the input frames.
@@ -37,8 +41,12 @@ class AudioDecoder(nn.Module):
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size for the convolutional module.
         dropout (float): dropout probability for each module.
-        contexts (List[Tuple[int, int]]): list of tuples representing
-            segment length and left context length for streaming inference.
+        use_cross_attn (bool, optional): use cross-attention module. Default: False.
+        cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
+        min_chunk_size (int, optional): minimum chunk size for dynamic training. Default: 1.
+        max_chunk_size (int, optional): maximum chunk size for dynamic training. Default: -1.
+        left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
+        full_context_prob (float, optional): probability of full context mode. Default: 0.0.
     """
 
     def __init__(
@@ -50,29 +58,27 @@ class AudioDecoder(nn.Module):
         num_heads: int,
         kernel_size: int,
         dropout: int,
-        contexts: List[Tuple[int, int]],
         use_cross_attn: bool = False,
         cross_attn_dim: int = 256,
+        min_chunk_size: int = 1,
+        max_chunk_size: int = -1,
+        left_context_ratio: int = 4,
+        full_context_prob: float = 0.0,
     ):
         super().__init__()
 
         self.chunk_size = None
         self.left_context = None
 
-        for segment_length, left_context_length in contexts:
-            if segment_length <= 0 or left_context_length <= 0:
-                raise ValueError("The context size should be positive integers.")
-
-            if left_context_length % segment_length != 0:
-                raise ValueError(
-                    "left_context_length should be divisible by segment_length"
-                )
-
         self.window_size = window_size
         self.embed_dim = d_model
         self.kernel_size = kernel_size
-        self.attn_contexts = contexts
         self.use_cross_attn = use_cross_attn
+
+        self.min_chunk_size = min_chunk_size
+        self.max_chunk_size = max_chunk_size
+        self.left_context_ratio = left_context_ratio
+        self.full_context_prob = full_context_prob
 
         self.layers = nn.ModuleList(
             [
@@ -102,6 +108,9 @@ class AudioDecoder(nn.Module):
     ):
         r"""Forward pass of the audio decoder.
 
+        During training, chunk sizes are randomly sampled. During inference,
+        uses streaming config if set, otherwise uses full context.
+
         Args:
             embeddings (Tensor): input tensor with shape `(B, T, D)`.
             embedding_lengths (Tensor): length of the input tensor.
@@ -119,11 +128,23 @@ class AudioDecoder(nn.Module):
         xs = embeddings
         x_lens = embedding_lengths
 
-        chunk_size, left_context = random.choice(self.attn_contexts)
-        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
+        if self.training:
+            chunk_size, left_context = sample_chunk_config(
+                x_lens,
+                self.min_chunk_size,
+                self.max_chunk_size,
+                self.left_context_ratio,
+                self.full_context_prob,
+            )
+        elif (self.chunk_size is not None) and (self.left_context is not None):
+            chunk_size, left_context = self.chunk_size, self.left_context
+        else:
+            chunk_size, left_context = xs.size(1), 0
 
-        conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
+        conv_mask = make_padding_mask(x_lens)
+
+        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
         prompt_mask = None
         if self.use_cross_attn and prompts is not None:
@@ -195,19 +216,15 @@ class AudioDecoder(nn.Module):
         return xs, new_caches
 
     @torch.jit.export
-    def set_streaming_config(self, chunk_size: int, left_context: int):
+    def set_streaming_config(self, chunk_size: int):
         r"""Set the streaming configuration for the audio decoder.
 
         Args:
             chunk_size (int): segment length for streaming inference.
-            left_context (int): left context length for the attention module.
         """
 
-        if [chunk_size, left_context] not in self.attn_contexts:
-            raise ValueError("The size is not in the list of valid contexts.")
-
         self.chunk_size = chunk_size
-        self.left_context = left_context
+        self.left_context = chunk_size * self.left_context_ratio
 
     def _initiate_states(
         self, batch_size: int, left_context: int, device: torch.device
@@ -224,8 +241,10 @@ class AudioDecoder(nn.Module):
                 internal state for each convolution and attention module.
         """
 
+        conv_left_context = self.kernel_size - 1 if left_context > 0 else 0
+
         conv_cache = torch.zeros(
-            batch_size, self.embed_dim, self.kernel_size - 1, device=device
+            batch_size, self.embed_dim, conv_left_context, device=device
         )
         attn_cache = torch.zeros(
             batch_size, left_context, self.embed_dim, device=device
@@ -237,6 +256,8 @@ class AudioDecoder(nn.Module):
 class TextDecoder(nn.Module):
     r"""Text Decoder for speech recognition and other text processing tasks.
 
+    Uses dynamic chunk training for unified streaming and non-streaming models.
+
     Args:
         output_dim (int): number of output classes.
         num_layers (int): number of conformer layers.
@@ -245,8 +266,10 @@ class TextDecoder(nn.Module):
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size for the convolutional module.
         dropout (float): dropout probability for the decoder.
-        contexts (List[Tuple[int, int]]): list of tuples representing
-            segment length and left context length for attention.
+        min_chunk_size (int, optional): minimum chunk size for dynamic training. Default: 1.
+        max_chunk_size (int, optional): maximum chunk size for dynamic training. Default: -1.
+        left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
+        full_context_prob (float, optional): probability of full context mode. Default: 0.0.
     """
 
     def __init__(
@@ -258,27 +281,24 @@ class TextDecoder(nn.Module):
         num_heads: int,
         kernel_size: int,
         dropout: float,
-        contexts: List[Tuple[int, int]],
+        min_chunk_size: int = 1,
+        max_chunk_size: int = -1,
+        left_context_ratio: int = 4,
+        full_context_prob: float = 0.0,
     ) -> None:
         super().__init__()
 
         self.chunk_size = None
         self.left_context = None
 
-        for segment_length, left_context_length in contexts:
-            if segment_length <= 0 or left_context_length <= 0:
-                raise ValueError("The context size should be positive integers.")
-
-            if left_context_length % segment_length != 0:
-                raise ValueError(
-                    "left_context_length should be divisible by segment_length"
-                )
-
         self.embed_dim = d_model
         self.kernel_size = kernel_size
-        self.attn_contexts = contexts
 
-        # Conformer layers
+        self.min_chunk_size = min_chunk_size
+        self.max_chunk_size = max_chunk_size
+        self.left_context_ratio = left_context_ratio
+        self.full_context_prob = full_context_prob
+
         self.layers = nn.ModuleList(
             [
                 ConformerLayer(d_model, ffn_dim, num_heads, kernel_size, dropout)
@@ -286,7 +306,6 @@ class TextDecoder(nn.Module):
             ]
         )
 
-        # Output projection
         self.projector = nn.Sequential(
             nn.Linear(d_model, ffn_dim), nn.ReLU(), nn.Linear(ffn_dim, output_dim)
         )
@@ -295,6 +314,9 @@ class TextDecoder(nn.Module):
         self, encoder_outputs: torch.Tensor, encoder_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass for the text decoder.
+
+        During training, chunk sizes are randomly sampled. During inference,
+        uses streaming config if set, otherwise uses full context.
 
         Args:
             encoder_outputs (Tensor): encoder outputs with shape `(B, T, D)`.
@@ -314,11 +336,23 @@ class TextDecoder(nn.Module):
         xs = encoder_outputs
         x_lens = encoder_lengths
 
-        chunk_size, left_context = random.choice(self.attn_contexts)
-        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
+        if self.training:
+            chunk_size, left_context = sample_chunk_config(
+                x_lens,
+                self.min_chunk_size,
+                self.max_chunk_size,
+                self.left_context_ratio,
+                self.full_context_prob,
+            )
+        elif (self.chunk_size is not None) and (self.left_context is not None):
+            chunk_size, left_context = self.chunk_size, self.left_context
+        else:
+            chunk_size, left_context = xs.size(1), 0
 
-        conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
+        conv_mask = make_padding_mask(x_lens)
+
+        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
             xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
@@ -371,19 +405,15 @@ class TextDecoder(nn.Module):
         return outputs, new_caches
 
     @torch.jit.export
-    def set_streaming_config(self, chunk_size: int, left_context: int):
+    def set_streaming_config(self, chunk_size: int):
         r"""Set the streaming configuration for the text decoder.
 
         Args:
             chunk_size (int): segment length for streaming inference.
-            left_context (int): left context length for the attention module.
         """
 
-        if [chunk_size, left_context] not in self.attn_contexts:
-            raise ValueError("The size is not in the list of valid contexts.")
-
         self.chunk_size = chunk_size
-        self.left_context = left_context
+        self.left_context = chunk_size * self.left_context_ratio
 
     def _initiate_states(
         self, batch_size: int, left_context: int, device: torch.device
@@ -400,8 +430,10 @@ class TextDecoder(nn.Module):
                 internal state for each convolution and attention module.
         """
 
+        conv_left_context = self.kernel_size - 1 if left_context > 0 else 0
+
         conv_cache = torch.zeros(
-            batch_size, self.embed_dim, self.kernel_size - 1, device=device
+            batch_size, self.embed_dim, conv_left_context, device=device
         )
         attn_cache = torch.zeros(
             batch_size, left_context, self.embed_dim, device=device
