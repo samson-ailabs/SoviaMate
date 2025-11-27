@@ -50,12 +50,12 @@ class NoamAnnealing(_LRScheduler):
         last_epoch=-1,
     ):
         self._normalize = d_model ** (-0.5)
-        assert not (
-            warmup_steps is not None and warmup_ratio is not None
-        ), "Either use particular number of step or ratio"
-        assert (
-            warmup_ratio is None or max_steps is not None
-        ), "If there is a ratio, there should be a total steps"
+        assert not (warmup_steps is not None and warmup_ratio is not None), (
+            "Either use particular number of step or ratio"
+        )
+        assert warmup_ratio is None or max_steps is not None, (
+            "If there is a ratio, there should be a total steps"
+        )
 
         # It is necessary to assign all attributes *before* __init__,
         # as class is wrapped by an inner class.

@@ -38,7 +38,6 @@ class LogMelFilterbank:
         hop_length: float,
         n_mels: int,
     ):
-
         if isinstance(sample_rates, int):
             sample_rates = [sample_rates]
 

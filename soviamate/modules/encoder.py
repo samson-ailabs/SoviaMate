@@ -41,12 +41,11 @@ class AudioEncoder(nn.Module):
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size for the convolutional module.
         dropout (float): dropout probability for each module.
-        use_cross_attn (bool, optional): use cross-attention module. Default: False.
-        cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
-        min_chunk_size (int, optional): minimum chunk size for dynamic training. Default: 1.
-        max_chunk_size (int, optional): maximum chunk size for dynamic training. Default: -1.
+        dynamic_chunk_sizes (List[int]): chunk sizes to sample from during training.
         left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
         full_context_prob (float, optional): probability of full context mode. Default: 0.0.
+        use_cross_attn (bool, optional): use cross-attention module. Default: False.
+        cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
     """
 
     def __init__(
@@ -58,25 +57,23 @@ class AudioEncoder(nn.Module):
         num_heads: int,
         kernel_size: int,
         dropout: int,
-        use_cross_attn: bool = False,
-        cross_attn_dim: int = 256,
-        min_chunk_size: int = 1,
-        max_chunk_size: int = -1,
+        dynamic_chunk_sizes: List[int],
         left_context_ratio: int = 4,
         full_context_prob: float = 0.0,
+        use_cross_attn: bool = False,
+        cross_attn_dim: int = 256,
     ):
         super().__init__()
 
-        self.chunk_size = None
-        self.left_context = None
+        self.streaming_chunk_size = None
+        self.streaming_left_context = None
 
         self.window_size = window_size
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
 
-        self.min_chunk_size = min_chunk_size
-        self.max_chunk_size = max_chunk_size
+        self.dynamic_chunk_sizes = dynamic_chunk_sizes
         self.left_context_ratio = left_context_ratio
         self.full_context_prob = full_context_prob
 
@@ -130,13 +127,13 @@ class AudioEncoder(nn.Module):
         if self.training:
             chunk_size, left_context = sample_chunk_config(
                 x_lens,
-                self.min_chunk_size,
-                self.max_chunk_size,
+                self.dynamic_chunk_sizes,
                 self.left_context_ratio,
                 self.full_context_prob,
             )
-        elif (self.chunk_size is not None) and (self.left_context is not None):
-            chunk_size, left_context = self.chunk_size, self.left_context
+        elif self.streaming_chunk_size is not None:
+            chunk_size = self.streaming_chunk_size
+            left_context = self.streaming_left_context
         else:
             chunk_size, left_context = xs.size(1), 0
 
@@ -170,7 +167,7 @@ class AudioEncoder(nn.Module):
             segment (Tensor): input tensor with shape `(B, chunk_size, 1)`.
             caches (List[List[Tensor]]): list of lists of tensors representing
                 internal state for each convolution and attention module.
-            prompts (Tensor, optional): pre-computed prompt features with shape `(B, T_prompt, D_prompt)`.
+            prompts (Tensor, optional): pre-computed prompt features with shape `(B, T, D)`.
                 Should be computed once and reused for all chunks.
             prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
 
@@ -180,9 +177,9 @@ class AudioEncoder(nn.Module):
         """
 
         batch_size, device = segments.size(0), segments.device
-        valid_segment_length = self.chunk_size * self.window_size
+        valid_segment_length = self.streaming_chunk_size * self.window_size
 
-        if self.chunk_size is None or self.left_context is None:
+        if self.streaming_chunk_size is None or self.streaming_left_context is None:
             raise ValueError("The streaming configuration is not set.")
 
         if segments.size(1) != valid_segment_length:
@@ -192,7 +189,9 @@ class AudioEncoder(nn.Module):
             raise ValueError("The audio signal should be mono-channel.")
 
         if caches is None:
-            caches = self._initiate_states(batch_size, self.left_context, device)
+            caches = self._initiate_states(
+                batch_size, self.streaming_left_context, device
+            )
 
         lengths = torch.tensor(
             [valid_segment_length] * batch_size, device=segments.device
@@ -201,7 +200,9 @@ class AudioEncoder(nn.Module):
         xs, x_lens = self.specgram(segments, lengths)
 
         conv_mask = make_padding_mask(x_lens)
-        attn_mask = make_attention_mask(x_lens, self.chunk_size, self.left_context)
+        attn_mask = make_attention_mask(
+            x_lens, self.streaming_chunk_size, self.streaming_left_context
+        )
 
         prompt_mask = None
         if self.use_cross_attn and prompts is not None:
@@ -224,8 +225,8 @@ class AudioEncoder(nn.Module):
             chunk_size (int): segment length for streaming inference.
         """
 
-        self.chunk_size = chunk_size
-        self.left_context = chunk_size * self.left_context_ratio
+        self.streaming_chunk_size = chunk_size
+        self.streaming_left_context = chunk_size * self.left_context_ratio
 
     def _initiate_states(
         self, batch_size: int, left_context: int, device: torch.device

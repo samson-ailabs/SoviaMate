@@ -128,19 +128,18 @@ def make_attention_mask(
 
 def sample_chunk_config(
     lengths: torch.Tensor,
-    min_chunk_size: int = 1,
-    max_chunk_size: int = -1,
+    dynamic_chunk_sizes: List[int],
     left_context_ratio: int = 4,
     full_context_prob: float = 0.0,
 ) -> Tuple[int, int]:
     r"""Sample chunk configuration for dynamic chunk training.
 
-    Randomly samples chunk size to enable unified streaming and non-streaming models.
+    Randomly samples chunk size from discrete choices to enable unified
+    streaming and non-streaming models.
 
     Args:
         lengths (Tensor): Sequence lengths in the batch with shape `(B,)`.
-        min_chunk_size (int): Minimum chunk size in frames. Default: 1.
-        max_chunk_size (int): Maximum chunk size. If -1, uses max length. Default: -1.
+        dynamic_chunk_sizes (List[int]): List of chunk sizes to sample from.
         left_context_ratio (int): Ratio of left_context to chunk_size. Default: 4.
         full_context_prob (float): Probability of full context mode. Default: 0.0.
 
@@ -151,15 +150,15 @@ def sample_chunk_config(
     min_length = int(lengths.min().item())
     max_length = int(lengths.max().item())
 
-    if random.random() >= full_context_prob and min_chunk_size < min_length:
-        effective_max_chunk_size = (
-            max_length if max_chunk_size < 0 else min(max_chunk_size, max_length)
-        )
+    if random.random() >= full_context_prob:
+        valid_chunk_sizes = [
+            chunk_size
+            for chunk_size in dynamic_chunk_sizes
+            if chunk_size * (1 + left_context_ratio) < min_length
+        ]
 
-        chunk_size = random.randint(min_chunk_size, effective_max_chunk_size)
-        left_context = left_context_ratio * chunk_size
-
-        if chunk_size + left_context < min_length:
-            return chunk_size, left_context
+        if valid_chunk_sizes:
+            chunk_size = random.choice(valid_chunk_sizes)
+            return chunk_size, left_context_ratio * chunk_size
 
     return max_length, 0
