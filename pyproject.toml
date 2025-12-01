@@ -16,8 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-extract-transcripts = "scripts.extract_transcripts:main"
-train-tokenizer = "scripts.train_tokenizer:main"
+prepare-tokenizer = "scripts.prepare_tokenizer:main"
 
 [dependency-groups]
 dev = [
