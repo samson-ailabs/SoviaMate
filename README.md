@@ -29,7 +29,7 @@ SoviaMate is an AI-powered assistant built to revolutionize speech and language 
 
 2. Install dependencies:
     ```sh
-    uv sync
+    uv sync --frozen
     ```
 
 3. Download model checkpoints (required for inference):
