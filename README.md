@@ -34,7 +34,7 @@ SoviaMate is an AI-powered assistant built to revolutionize speech and language 
 
 3. Download model checkpoints (required for inference):
     ```sh
-    hf download samson-voice98/SoviaMate-Codec --local-dir models
+    hf download samson-labs/SoviaMate-Codec --local-dir models
     ```
 
 ## Contributing
