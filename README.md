@@ -19,7 +19,6 @@ SoviaMate is an AI-powered assistant built to revolutionize speech and language 
 ### Prerequisites
 - Python 3.12 or later
 - [uv](https://docs.astral.sh/uv/) package manager
-- [Git LFS](https://git-lfs.com/) for model checkpoints
 
 ### Installation
 1. Clone the repository:
@@ -35,8 +34,7 @@ SoviaMate is an AI-powered assistant built to revolutionize speech and language 
 
 3. Download model checkpoints (required for inference):
     ```sh
-    git lfs install
-    git lfs pull
+    hf download samson-voice98/SoviaMate-Codec --local-dir models
     ```
 
 ## Contributing

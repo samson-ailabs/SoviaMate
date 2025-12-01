@@ -185,5 +185,8 @@ outputs/
 # Lightning logging
 lightning_logs/
 
+# Model checkpoints (download from HuggingFace)
+models/
+
 # Data files and training datasets
 data/
