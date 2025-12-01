@@ -14,20 +14,20 @@ task:
       filepaths: /data/MLS-English/trainset.jsonl
       tokenizer: *tokenizer
 
-      # transforms:
-      #   content:
-      #     perturb:
-      #       _target_: soviamate.datas.transform.SpeakerPerturbation
-      #       min_formant_factor: 0.8
-      #       max_formant_factor: 1.2
-      #       probability: 1.0
+      transforms:
+        content:
+          perturb:
+            _target_: soviamate.datas.transform.SpeakerPerturbation
+            min_formant_factor: 0.8
+            max_formant_factor: 1.2
+            probability: 1.0
 
-      #   speaker:
-      #     trimmer:
-      #       _target_: soviamate.datas.transform.AudioTrimmer
-      #       percentage: 0.3
-      #       min_duration: 0.7
-      #       probability: 1.0
+        speaker:
+          trimmer:
+            _target_: soviamate.datas.transform.AudioTrimmer
+            percentage: 0.3
+            min_duration: 0.7
+            probability: 1.0
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
