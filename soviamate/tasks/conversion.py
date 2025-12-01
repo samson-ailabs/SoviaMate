@@ -189,7 +189,7 @@ class AudioCodecTask(L.LightningModule):
         # Train discriminator
         self.toggle_optimizer(disc_optim)
 
-        if random.random() < 0.5:  # Train discriminator every 50% of the time
+        if self.global_step == 0 or random.random() < 0.5:
             fake_segments, real_segments = self._get_random_segments(
                 output_audios, target_audios, target_lengths
             )

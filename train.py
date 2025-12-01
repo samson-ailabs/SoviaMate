@@ -14,18 +14,14 @@
 
 """A flexible training pipeline for various tasks."""
 
-import warnings
-
 import hydra
 import lightning as L
+import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
-import torch
-
 L.seed_everything(42, workers=True)
 torch.set_float32_matmul_precision("high")
-warnings.filterwarnings("ignore", category=UserWarning)
 
 
 @hydra.main(version_base=None, config_path="configs/training")

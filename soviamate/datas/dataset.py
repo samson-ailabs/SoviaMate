@@ -43,19 +43,14 @@ class AudioCodecDataset(Dataset):
         self.dataset = load_dataset(filepaths)
         self.tokenizer = instantiate(tokenizer)
 
-        if transforms and transforms.get("source") is not None:
-            self.source_transforms = [
-                instantiate(transform) for transform in transforms.source.values()
+        if transforms and transforms.get("content") is not None:
+            self.content_transforms = [
+                instantiate(transform) for transform in transforms.content.values()
             ]
 
-        if transforms and transforms.get("target") is not None:
-            self.target_transforms = [
-                instantiate(transform) for transform in transforms.target.values()
-            ]
-
-        if transforms and transforms.get("prompt") is not None:
-            self.prompt_transforms = [
-                instantiate(transform) for transform in transforms.prompt.values()
+        if transforms and transforms.get("speaker") is not None:
+            self.speaker_transforms = [
+                instantiate(transform) for transform in transforms.speaker.values()
             ]
 
     def __len__(self):
@@ -66,41 +61,18 @@ class AudioCodecDataset(Dataset):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         sample = self.dataset[idx]
 
-        source_audio, source_sample_rate = torchaudio.load(sample["audio_filepath"])
-        target_audio, target_sample_rate = torchaudio.load(sample["target_filepath"])
+        audio, sample_rate = torchaudio.load_with_torchcodec(sample["audio_filepath"])
+        source_audio = target_audio = prompt_audio = audio.clone()
 
-        if source_sample_rate != target_sample_rate:
-            source_audio = torchaudio.functional.resample(
-                source_audio, source_sample_rate, target_sample_rate
-            )
-            source_sample_rate = target_sample_rate
+        # Apply content transforms if any (noise, RIR, etc.)
+        if hasattr(self, "content_transforms"):
+            for transform in self.content_transforms:
+                source_audio = transform.apply(source_audio, sample_rate)
 
-        # Apply source transforms (degradation augmentation on source domain)
-        if hasattr(self, "source_transforms"):
-            for transform in self.source_transforms:
-                source_audio = transform.apply(source_audio, source_sample_rate)
-
-        # Apply target transforms (speaker/timbre augmentation on target domain)
-        if hasattr(self, "target_transforms"):
-            for transform in self.target_transforms:
-                target_audio = transform.apply(target_audio, target_sample_rate)
-
-        # Create prompt from target audio or load from file
-        if sample.get("prompt_filepath") is not None:
-            prompt_audio, prompt_sample_rate = torchaudio.load(
-                sample["prompt_filepath"]
-            )
-            assert prompt_sample_rate == target_sample_rate, (
-                f"Sample rates mismatch: {prompt_sample_rate} != {target_sample_rate}"
-            )
-        else:
-            # Use transformed target audio as base for prompt
-            prompt_audio, prompt_sample_rate = target_audio, target_sample_rate
-
-        # Apply prompt transforms (extraction/trimming from target)
-        if hasattr(self, "prompt_transforms"):
-            for transform in self.prompt_transforms:
-                prompt_audio = transform.apply(prompt_audio, prompt_sample_rate)
+        # Apply speaker transforms if any (trimming, speed perturbation, etc.)
+        if hasattr(self, "speaker_transforms"):
+            for transform in self.speaker_transforms:
+                prompt_audio = transform.apply(prompt_audio, sample_rate)
 
         target_tokens = self.tokenizer.encode(sample["transcript"])
         target_tokens = torch.tensor(target_tokens, dtype=torch.long)
@@ -120,19 +92,19 @@ class AudioCodecDataset(Dataset):
 
         source_audios, prompt_audios, target_audios, target_tokens = zip(*batch)
 
-        source_audios, source_lengths = stack_batches(source_audios)
-        prompt_audios, prompt_lengths = stack_batches(prompt_audios)
+        source_audios, source_audio_lengths = stack_batches(source_audios)
+        prompt_audios, prompt_audio_lengths = stack_batches(prompt_audios)
 
-        target_audios, target_lengths = stack_batches(target_audios)
+        target_audios, target_audio_lengths = stack_batches(target_audios)
         target_tokens, target_token_lengths = stack_batches(target_tokens)
 
         return (
             source_audios,
-            source_lengths,
+            source_audio_lengths,
             prompt_audios,
-            prompt_lengths,
+            prompt_audio_lengths,
             target_audios,
-            target_lengths,
+            target_audio_lengths,
             target_tokens,
             target_token_lengths,
         )
