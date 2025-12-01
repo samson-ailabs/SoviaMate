@@ -20,7 +20,7 @@ from typing import Tuple
 
 import lightning as L
 from hydra.utils import instantiate
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 import torch
 import torch.nn.functional as F
@@ -38,48 +38,47 @@ class AudioCodecTask(L.LightningModule):
         optim (DictConfig): Configuration for the optimizer and scheduler.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, data: DictConfig, model: DictConfig, optim: DictConfig) -> None:
         super().__init__()
 
         self.automatic_optimization = False
         self.save_hyperparameters("data", "model", "optim")
 
-        self.audio_encoder = instantiate(self.hparams.model.audio_encoder)
-        self.audio_quantizer = instantiate(self.hparams.model.audio_quantizer)
-        self.audio_decoder = instantiate(self.hparams.model.audio_decoder)
+        self.audio_encoder = instantiate(model.audio_encoder)
+        self.audio_quantizer = instantiate(model.audio_quantizer)
+        self.audio_decoder = instantiate(model.audio_decoder)
+        self.discriminator = instantiate(model.discriminator)
 
-        self.discriminator = instantiate(self.hparams.model.discriminator)
-
-        self.audio_loss = instantiate(self.hparams.model.audio_loss)
-        self.adv_loss = instantiate(self.hparams.model.adv_loss)
+        self.audio_loss = instantiate(model.audio_loss)
+        self.adv_loss = instantiate(model.adv_loss)
 
         # SpecAugment for hidden representations
-        if hasattr(self.hparams.model, "spec_augment"):
-            self.spec_augment = instantiate(self.hparams.model.spec_augment)
+        if hasattr(model, "spec_augment"):
+            self.spec_augment = instantiate(model.spec_augment)
         else:
             self.spec_augment = None
 
         # ASR decoder for auxiliary training
-        if hasattr(self.hparams.model, "text_decoder"):
-            self.text_decoder = instantiate(self.hparams.model.text_decoder)
+        if hasattr(model, "text_decoder"):
+            self.text_decoder = instantiate(model.text_decoder)
         else:
             self.text_decoder = None
 
         # ASR loss for auxiliary training
-        if hasattr(self.hparams.model, "text_loss"):
-            self.text_loss = instantiate(self.hparams.model.text_loss)
+        if hasattr(model, "text_loss"):
+            self.text_loss = instantiate(model.text_loss)
         else:
             self.text_loss = None
 
         # Speaker adapter for speaker adaptation
-        if hasattr(self.hparams.model, "speaker_adapter"):
-            self.speaker_adapter = instantiate(self.hparams.model.speaker_adapter)
+        if hasattr(model, "speaker_adapter"):
+            self.speaker_adapter = instantiate(model.speaker_adapter)
         else:
             self.speaker_adapter = None
 
         # Speaker contrastive loss for content disentanglement
-        if hasattr(self.hparams.model, "speaker_loss"):
-            self.speaker_loss = instantiate(self.hparams.model.speaker_loss)
+        if hasattr(model, "speaker_loss"):
+            self.speaker_loss = instantiate(model.speaker_loss)
         else:
             self.speaker_loss = None
 
@@ -477,24 +476,26 @@ class AudioCodecTask(L.LightningModule):
         Args:
             filepath: Path where to save the checkpoint.
         """
-        # Build state dict with nested structure
-        state_dict = {
+        # Build model weights for main components
+        model_weights = {
             "audio_encoder": self.audio_encoder.state_dict(),
             "audio_quantizer": self.audio_quantizer.state_dict(),
             "audio_decoder": self.audio_decoder.state_dict(),
         }
 
-        # Optional components
+        # Optional components for ASR and speaker adaptation
         if self.text_decoder is not None:
-            state_dict["text_decoder"] = self.text_decoder.state_dict()
+            model_weights["text_decoder"] = self.text_decoder.state_dict()
 
         if self.speaker_adapter is not None:
-            state_dict["speaker_adapter"] = self.speaker_adapter.state_dict()
+            model_weights["speaker_adapter"] = self.speaker_adapter.state_dict()
 
-        # Create checkpoint with model components and hyperparameters
-        hparams = OmegaConf.to_container(self.hparams.model, resolve=True)
-        checkpoint = {"state_dict": state_dict, "hyper_parameters": hparams}
+        # Convert hyperparameters to plain dict for portable checkpoint
+        hyper_parameters = {
+            "data": OmegaConf.to_container(self.hparams.data, resolve=True),
+            "model": OmegaConf.to_container(self.hparams.model, resolve=True),
+        }
 
         # Save checkpoint
-        torch.save(checkpoint, filepath)
-        print(f"Exported model checkpoint to: {filepath}")
+        torch.save({"model_weights": model_weights, "hyper_parameters": hyper_parameters}, filepath)
+        print(f"Exported model checkpoint to {filepath}")

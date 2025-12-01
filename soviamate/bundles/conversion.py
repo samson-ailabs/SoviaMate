@@ -116,7 +116,6 @@ class AudioCodecBundle(nn.Module):
         Args:
             checkpoint: Path to checkpoint created by AudioCodecTask.export_model().
             device: Device to load the model to ('cpu', 'cuda', 'cuda:0', etc.).
-                Defaults to 'cpu' if not specified.
 
         Returns:
             AudioCodecBundle instance with loaded weights.
@@ -127,60 +126,58 @@ class AudioCodecBundle(nn.Module):
 
         # Load checkpoint (exported with plain dicts, safe to load)
         device = device if device is not None else "cpu"
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=device, weights_only=False
+        )
 
-        # Extract state dict (must be from export_model)
-        if "state_dict" not in checkpoint:
+        # Extract model weights (must be from export_model)
+        if "model_weights" not in checkpoint:
             raise KeyError(
-                "Checkpoint must contain `state_dict` key. "
+                "Checkpoint must contain `model_weights` key. "
                 "Use AudioCodecTask.export_model() to create a valid checkpoint."
             )
 
-        state_dict = checkpoint["state_dict"]
+        model_weights = checkpoint["model_weights"]
 
-        # Extract component states
-        encoder_state = state_dict.get("audio_encoder", {})
-        quantizer_state = state_dict.get("audio_quantizer", {})
-        decoder_state = state_dict.get("audio_decoder", {})
-        text_decoder_state = state_dict.get("text_decoder", {})
-        speaker_adapter_state = state_dict.get("speaker_adapter", {})
+        # Extract component weights
+        audio_encoder_weights = model_weights.get("audio_encoder", {})
+        audio_quantizer_weights = model_weights.get("audio_quantizer", {})
+        audio_decoder_weights = model_weights.get("audio_decoder", {})
+        text_decoder_weights = model_weights.get("text_decoder", {})
+        speaker_adapter_weights = model_weights.get("speaker_adapter", {})
 
         # Instantiate components from hyperparameters
         if "hyper_parameters" not in checkpoint:
             raise KeyError(
-                "Checkpoint must contain 'hyper_parameters' key. "
+                "Checkpoint must contain `hyper_parameters` key. "
                 "Use AudioCodecTask.export_model() to create a valid checkpoint."
             )
 
-        model_config = checkpoint["hyper_parameters"]
-
-        if not model_config:
-            raise ValueError(
-                "Checkpoint hyperparameters must contain model configuration."
-            )
+        hparams = checkpoint["hyper_parameters"]
+        model_config = hparams.get("model", hparams)
 
         audio_encoder = instantiate(model_config["audio_encoder"])
         audio_quantizer = instantiate(model_config["audio_quantizer"])
         audio_decoder = instantiate(model_config["audio_decoder"])
 
         text_decoder = None
-        if "text_decoder" in model_config and text_decoder_state:
+        if "text_decoder" in model_config and text_decoder_weights:
             text_decoder = instantiate(model_config["text_decoder"])
 
         speaker_adapter = None
-        if "speaker_adapter" in model_config and speaker_adapter_state:
+        if "speaker_adapter" in model_config and speaker_adapter_weights:
             speaker_adapter = instantiate(model_config["speaker_adapter"])
 
-        # Load state dicts
-        audio_encoder.load_state_dict(encoder_state)
-        audio_quantizer.load_state_dict(quantizer_state)
-        audio_decoder.load_state_dict(decoder_state)
+        # Load model weights
+        audio_encoder.load_state_dict(audio_encoder_weights)
+        audio_quantizer.load_state_dict(audio_quantizer_weights)
+        audio_decoder.load_state_dict(audio_decoder_weights)
 
-        if text_decoder is not None and text_decoder_state:
-            text_decoder.load_state_dict(text_decoder_state)
+        if text_decoder is not None and text_decoder_weights:
+            text_decoder.load_state_dict(text_decoder_weights)
 
-        if speaker_adapter is not None and speaker_adapter_state:
-            speaker_adapter.load_state_dict(speaker_adapter_state)
+        if speaker_adapter is not None and speaker_adapter_weights:
+            speaker_adapter.load_state_dict(speaker_adapter_weights)
 
         # Build bundle
         bundle = cls(
