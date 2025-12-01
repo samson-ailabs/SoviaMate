@@ -77,6 +77,12 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.speaker_adapter = None
 
+        # Speaker contrastive loss for content disentanglement
+        if hasattr(self.hparams.model, "speaker_loss"):
+            self.speaker_loss = instantiate(self.hparams.model.speaker_loss)
+        else:
+            self.speaker_loss = None
+
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
             self.hparams.data.trainset,
@@ -107,56 +113,84 @@ class AudioCodecTask(L.LightningModule):
         self,
         source_audios: torch.Tensor,
         source_lengths: torch.Tensor,
-        target_lengths: torch.Tensor | None = None,
         prompt_audios: torch.Tensor | None = None,
         prompt_lengths: torch.Tensor | None = None,
+        target_audios: torch.Tensor | None = None,
+        target_lengths: torch.Tensor | None = None,
         apply_spec_augment: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        # Encode audio (shared encoder for both audio codec and ASR)
-        encoder_features, encoder_lengths = self.audio_encoder(
-            source_audios, source_lengths
-        )
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        # Encode source and target in one shot for better GPU utilization
+        if (target_audios is not None) and (self.speaker_loss is not None):
+            # Batch encode: concatenate source and target
+            combined_audios = torch.cat([source_audios, target_audios], dim=0)
+            combined_lengths = torch.cat([source_lengths, target_lengths], dim=0)
 
-        # ASR branch (text recognition)
-        output_tokens = None
-        output_token_lengths = None
+            # Single forward pass (batch size = 2B)
+            combined_features, combined_feature_lengths = self.audio_encoder(
+                combined_audios, combined_lengths
+            )
 
+            # Split back into source and target
+            source_features, target_features = torch.chunk(combined_features, 2, dim=0)
+            source_feature_lengths, target_feature_lengths = torch.chunk(
+                combined_feature_lengths, 2, dim=0
+            )
+        else:
+            # Only encode source (no target for contrastive learning)
+            source_features, source_feature_lengths = self.audio_encoder(
+                source_audios, source_lengths
+            )
+            target_features, target_feature_lengths = None, None
+
+        # Text recognition branch (optional)
+        output_tokens, output_token_lengths = None, None
         if self.text_decoder is not None:
             asr_features = (
-                self.spec_augment(encoder_features, encoder_lengths)
+                self.spec_augment(source_features, source_feature_lengths)
                 if apply_spec_augment and self.spec_augment is not None
-                else encoder_features
+                else source_features
             )
 
             output_tokens, output_token_lengths = self.text_decoder(
-                asr_features, encoder_lengths
+                asr_features, source_feature_lengths
             )
 
-        # Audio codec branch (restoration)
-        quantized_features, quantized_lengths = self.audio_quantizer(
-            encoder_features, encoder_lengths
+        # Audio quantization branch
+        quantized_outputs, quantized_lengths = self.audio_quantizer(
+            source_features, source_feature_lengths
         )
 
-        # Speaker adaptation
-        if self.speaker_adapter is not None and prompt_audios is not None:
-            quantized_features, quantized_lengths = self.speaker_adapter(
-                quantized_features,
-                quantized_lengths,
-                prompt_audios,
-                prompt_lengths,
+        # Extract prompt features (optional)
+        speaker_embeddings, speaker_lengths = None, None
+        if (self.speaker_adapter is not None) and (prompt_audios is not None):
+            speaker_embeddings, speaker_lengths = self.speaker_adapter(
+                prompt_audios, prompt_lengths
             )
 
-        # Decode to audio
-        output_audios, output_lengths = self.audio_decoder(
-            quantized_features, quantized_lengths
+        # Decode to audio with prompt conditioning
+        output_audios, output_audio_lengths = self.audio_decoder(
+            quantized_outputs, quantized_lengths, speaker_embeddings, speaker_lengths
         )
 
-        if target_lengths is not None:
-            padding = target_lengths.max() - output_audios.size(1)
-            output_audios = F.pad(output_audios, (0, 0, 0, padding))
-            output_lengths = target_lengths.clone()
-
-        return output_audios, output_lengths, output_tokens, output_token_lengths
+        return (
+            output_audios,
+            output_audio_lengths,
+            output_tokens,
+            output_token_lengths,
+            source_features,
+            source_feature_lengths,
+            target_features,
+            target_feature_lengths,
+        )
 
     def training_step(self, batch: Tuple[torch.Tensor, ...]):
         (
@@ -170,16 +204,29 @@ class AudioCodecTask(L.LightningModule):
             target_token_lengths,
         ) = batch
 
-        output_audios, _, output_tokens, output_token_lengths = self.forward(
+        (
+            output_audios,
+            _,
+            output_tokens,
+            output_token_lengths,
+            source_features,
+            source_feature_lengths,
+            target_features,
+            target_feature_lengths,
+        ) = self.forward(
             source_audios,
             source_lengths,
-            target_lengths,
             prompt_audios,
             prompt_lengths,
+            target_audios,
+            target_lengths,
             apply_spec_augment=True,
         )
 
-        # Transpose to channel-first format for discriminator
+        if output_audios.size(1) != target_audios.size(1):
+            padding = target_audios.size(1) - output_audios.size(1)
+            output_audios = F.pad(output_audios, (0, 0, 0, padding))
+
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)
 
@@ -222,13 +269,24 @@ class AudioCodecTask(L.LightningModule):
         text_loss = 0.0
         if output_tokens is not None and self.text_loss is not None:
             text_loss = self.text_loss(
-                logits=output_tokens,
-                logit_lengths=output_token_lengths,
-                targets=target_tokens,
-                target_lengths=target_token_lengths,
+                output_tokens,
+                output_token_lengths,
+                target_tokens,
+                target_token_lengths,
             )
 
-        train_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
+        speaker_loss = 0.0
+        if target_features is not None and self.speaker_loss is not None:
+            speaker_loss = self.speaker_loss(
+                source_features,
+                target_features,
+                source_feature_lengths,
+                target_feature_lengths,
+            )
+
+        train_loss = (
+            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.3 * speaker_loss
+        )
         self.manual_backward(train_loss)
 
         gen_optim.step()
@@ -237,12 +295,16 @@ class AudioCodecTask(L.LightningModule):
 
         self.untoggle_optimizer(gen_optim)
 
-        # Log losses
         log_dict = {"train_audio_loss": audio_loss, "train_gen_loss": gen_loss}
+
         if "disc_loss" in locals():
             log_dict["train_disc_loss"] = disc_loss
+
         if text_loss > 0 and self.text_loss is not None:
             log_dict["train_text_loss"] = text_loss
+
+        if speaker_loss > 0 and self.speaker_loss is not None:
+            log_dict["train_speaker_loss"] = speaker_loss
 
         self.log_dict(log_dict, sync_dist=True)
         self.log("train_loss", train_loss, sync_dist=True, prog_bar=True)
@@ -259,15 +321,29 @@ class AudioCodecTask(L.LightningModule):
             target_token_lengths,
         ) = batch
 
-        output_audios, _, output_tokens, output_token_lengths = self.forward(
+        (
+            output_audios,
+            _,
+            output_tokens,
+            output_token_lengths,
+            source_features,
+            source_feature_lengths,
+            target_features,
+            target_feature_lengths,
+        ) = self.forward(
             source_audios,
             source_lengths,
-            target_lengths,
             prompt_audios,
             prompt_lengths,
+            target_audios,
+            target_lengths,
+            apply_spec_augment=False,
         )
 
-        # Transpose to channel-first format for discriminator
+        if output_audios.size(1) != target_audios.size(1):
+            padding = target_audios.size(1) - output_audios.size(1)
+            output_audios = F.pad(output_audios, (0, 0, 0, padding))
+
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)
 
@@ -283,17 +359,32 @@ class AudioCodecTask(L.LightningModule):
         text_loss = 0.0
         if output_tokens is not None and self.text_loss is not None:
             text_loss = self.text_loss(
-                logits=output_tokens,
-                logit_lengths=output_token_lengths,
-                targets=target_tokens,
-                target_lengths=target_token_lengths,
+                output_tokens,
+                output_token_lengths,
+                target_tokens,
+                target_token_lengths,
             )
 
-        val_loss = 2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss
+        speaker_loss = 0.0
+        if target_features is not None and self.speaker_loss is not None:
+            speaker_loss = self.speaker_loss(
+                source_features,
+                target_features,
+                source_feature_lengths,
+                target_feature_lengths,
+            )
+
+        val_loss = (
+            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.3 * speaker_loss
+        )
 
         log_dict = {"val_audio_loss": audio_loss, "val_gen_loss": gen_loss}
+
         if text_loss > 0 and self.text_loss is not None:
             log_dict["val_text_loss"] = text_loss
+
+        if speaker_loss > 0 and self.speaker_loss is not None:
+            log_dict["val_speaker_loss"] = speaker_loss
 
         self.log_dict(log_dict, sync_dist=True)
         self.log("val_loss", val_loss, sync_dist=True, prog_bar=True)

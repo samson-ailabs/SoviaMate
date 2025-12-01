@@ -62,15 +62,16 @@ class AudioCodecBundle(nn.Module):
     """Audio Codec Bundle for production.
 
     This class bundles the audio encoder, quantizer, and decoder along with
-    optional ASR decoder and speaker adapter components. Loads from checkpoints
-    created by AudioCodecTask.export_model() for production deployment.
+    optional ASR decoder. Supports speaker-controlled voice conversion via
+    WavLM-based speaker adaptation. Loads from checkpoints created by
+    AudioCodecTask.export_model() for production deployment.
 
     Args:
         audio_encoder: The audio encoder module.
         audio_quantizer: The audio quantizer module.
-        audio_decoder: The audio decoder module.
+        audio_decoder: The audio decoder module with cross-attention.
         text_decoder: Optional ASR text decoder module.
-        speaker_adapter: Optional speaker adaptation module.
+        speaker_adapter: Optional speaker adapter module for voice conversion.
         device: Device to place the model on ('cpu', 'cuda', 'cuda:0', etc.).
     """
 
@@ -286,7 +287,7 @@ class AudioCodecBundle(nn.Module):
     def _process(
         self, codec_inputs: CodecInputs, return_tokens: bool = False
     ) -> CodecOutputs:
-        """Process audio through the codec pipeline.
+        """Process audio through the codec pipeline with optional speaker adaptation.
 
         Args:
             codec_inputs: Structured inputs with batched tensors.
@@ -307,38 +308,37 @@ class AudioCodecBundle(nn.Module):
                 "Cannot apply speaker adaptation: speaker_adapter not available. "
                 "Load checkpoint with speaker_adapter component."
             )
-
-        # Encode
-        encoder_outputs, encoder_lengths = self.audio_encoder(
+        # Encode source audio
+        source_features, source_lengths = self.audio_encoder(
             codec_inputs.source_audios, codec_inputs.source_lengths
         )
 
-        # ASR decoding (optional)
+        # ASR decoding (optional): use source features only
         output_tokens = None
         token_lengths = None
 
         if return_tokens:
             output_tokens, token_lengths = self.text_decoder(
-                encoder_outputs, encoder_lengths
+                source_features, source_lengths
             )
 
-        # Quantize
+        # Quantize with FSQ
         quantized_outputs, quantized_lengths = self.audio_quantizer(
-            encoder_outputs, encoder_lengths
+            source_features, source_lengths
         )
 
-        # Speaker adaptation (optional)
-        if codec_inputs.prompt_audios is not None:
-            quantized_outputs, quantized_lengths = self.speaker_adapter(
-                quantized_outputs,
-                quantized_lengths,
-                codec_inputs.prompt_audios,
-                codec_inputs.prompt_lengths,
+        # Extract speaker embeddings from prompt (optional)
+        speaker_embeddings = None
+        speaker_lengths = None
+
+        if self.speaker_adapter is not None and codec_inputs.prompt_audios is not None:
+            speaker_embeddings, speaker_lengths = self.speaker_adapter(
+                codec_inputs.prompt_audios, codec_inputs.prompt_lengths
             )
 
-        # Decode
+        # Decode with speaker conditioning
         output_audios, output_lengths = self.audio_decoder(
-            quantized_outputs, quantized_lengths
+            quantized_outputs, quantized_lengths, speaker_embeddings, speaker_lengths
         )
 
         return CodecOutputs(
@@ -391,18 +391,34 @@ class AudioCodecBundle(nn.Module):
         Union[torch.Tensor, List[torch.Tensor]],
         Optional[Union[torch.Tensor, List[torch.Tensor]]],
     ]:
-        """Process audio with flexible input formats.
+        """Process audio with flexible input formats and optional speaker adaptation.
+
+        Supports two modes:
+        1. Standard codec (prompt_audios=None): Encode and decode audio
+        2. Voice conversion (prompt_audios provided): Convert source to target speaker
+           while preserving linguistic content (requires speaker_adapter)
 
         Args:
             source_audios: Audio input as single tensor (1, T) or list of
                 tensors [(1, T1), (1, T2), ...] where T is time dimension.
-            prompt_audios: Optional speaker prompts matching source format.
+            prompt_audios: Optional speaker reference audio matching source format.
                 Single tensor (1, T) or list [(1, T1), (1, T2), ...].
-            return_tokens: Whether to return ASR tokens.
+                Used to extract target speaker identity for voice conversion.
+            return_tokens: Whether to return ASR tokens (requires text_decoder).
 
         Returns:
             audios: Single tensor (1, T') or list [(1, T1'), ...] matching input format.
             tokens: Single tensor (L,) or list [(L1,), ...] if return_tokens is True, else None.
+
+        Examples:
+            >>> # Standard codec
+            >>> reconstructed_audio, _ = bundle(audio)
+
+            >>> # Voice conversion
+            >>> converted_audio, _ = bundle(source_audio, prompt_audios=target_speaker_audio)
+
+            >>> # Codec with ASR transcription
+            >>> reconstructed_audio, transcript = bundle(audio, return_tokens=True)
         """
         is_list = isinstance(source_audios, list)
 

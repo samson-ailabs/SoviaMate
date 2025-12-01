@@ -28,15 +28,14 @@ class TimeStretch:
     r"""Change the speed of the audio without modifying the pitch.
 
     Args:
-        min_speed_rate: Minimum speed rate to change the audio.
-        max_speed_rate: Maximum speed rate to change the audio.
-        probability: Probability of applying the speed perturbation
+        min_speed_rate (float): Minimum speed rate to change the audio.
+        max_speed_rate (float): Maximum speed rate to change the audio.
+        probability (float): Probability of applying the speed perturbation
     """
 
     def __init__(
         self, min_speed_rate: float, max_speed_rate: float, probability: float
     ):
-
         self.min_speed_rate = min_speed_rate
         self.max_speed_rate = max_speed_rate
         self.probability = probability
@@ -45,8 +44,8 @@ class TimeStretch:
         r"""Apply the time stretch effect to the waveform.
 
         Args:
-            waveform (Tensor): input waveform, shape (1, L)
-            sample_rate (int): sample rate of the waveform
+            waveform (Tensor): input waveform, shape `(1, L)`.
+            sample_rate (int): sample rate of the waveform.
 
         Returns:
             Tensor: waveform with the time stretch effect applied
@@ -63,52 +62,61 @@ class TimeStretch:
 
 
 class PitchShift:
-    r"""Change the pitch of the audio without adjusting the speed.
+    r"""Shift the pitch of audio without changing duration.
+
+    Uses Sox pitch effect to shift pitch by a specified number of semitones.
+    Preserves both duration and sample rate.
 
     Args:
-        min_pitch_rate: Minimum pitch rate to change the audio.
-        max_pitch_rate: Maximum pitch rate to change the audio.
-        probability: Probability of applying the speaker permutation.
+        min_semitones (float): Minimum number of semitones to shift pitch.
+        max_semitones (float): Maximum number of semitones to shift pitch.
+        probability (float): Probability of applying pitch shift.
     """
 
-    def __init__(
-        self, min_pitch_rate: float, max_pitch_rate: float, probability: float
-    ):
-
-        self.min_pitch_rate = min_pitch_rate
-        self.max_pitch_rate = max_pitch_rate
+    def __init__(self, min_semitones: float, max_semitones: float, probability: float):
+        self.min_semitones = min_semitones
+        self.max_semitones = max_semitones
         self.probability = probability
 
     def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        r"""Apply the pitch shift effect to the waveform.
+        r"""Apply pitch shift to the waveform.
 
         Args:
-            waveform (Tensor): input waveform, shape (1, L)
-            sample_rate (int): sample rate of the waveform
+            waveform (Tensor): input waveform, shape `(1, L)`.
+            sample_rate (int): sample rate of the waveform.
 
         Returns:
-            Tensor: waveform with the pitch shift effect applied
+            Tensor: waveform with pitch shifted (same duration and sample rate)
         """
-
         if random.random() > self.probability:
             return waveform
 
-        factor = random.uniform(self.min_pitch_rate, self.max_pitch_rate)
-        effector = torchaudio.io.AudioEffector(
-            effect=f"asetrate={sample_rate}*{factor},atempo=1/{factor}", pad_end=False
-        )
-        waveform = effector.apply(waveform.T, sample_rate)
+        original_length = waveform.size(-1)
 
-        return waveform.T
+        # Sample pitch shift and convert to cents (1 semitone = 100 cents)
+        semitones = random.uniform(self.min_semitones, self.max_semitones)
+        cents = int(semitones * 100)
+
+        # Apply pitch shift with rate normalization to preserve sample rate
+        effects = [["pitch", str(cents)], ["rate", str(sample_rate)]]
+        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
+            waveform, sample_rate, effects
+        )
+
+        # Ensure exact duration preservation
+        padding = original_length - waveform.size(-1)
+        waveform = F.pad(waveform, (0, padding))
+
+        return waveform
 
 
 class AudioTrimmer:
     r"""Trim the audio to a fixed percentage of the original length.
 
     Args:
-        percentage: Percentage of the original length to keep.
-        min_duration: Minimum duration of the audio after trimming.
-        probability: Probability of applying the audio trimming.
+        percentage (float): Percentage of the original length to keep.
+        min_duration (float): Minimum duration of the audio after trimming.
+        probability (float): Probability of applying the audio trimming.
     """
 
     def __init__(self, percentage: float, min_duration: float, probability: float):
@@ -120,8 +128,8 @@ class AudioTrimmer:
         r"""Trim the waveform to the maximum length.
 
         Args:
-            waveform (Tensor): input waveform, shape (1, L)
-            sample_rate (int): sample rate of the waveform
+            waveform (Tensor): input waveform, shape `(1, L)`.
+            sample_rate (int): sample rate of the waveform.
 
         Returns:
             Tensor: waveform with the trimming effect applied
@@ -143,14 +151,68 @@ class AudioTrimmer:
         return waveform
 
 
+class SpeakerPerturbation:
+    r"""Apply speaker timbre perturbation through formant shifting.
+
+    Modifies vocal characteristics (formants) to simulate different vocal tract sizes,
+    creating variations in speaker identity while preserving linguistic content and duration.
+
+    Args:
+        min_formant_factor (float): Minimum formant shift factor.
+        max_formant_factor (float): Maximum formant shift factor.
+        probability (float): Probability of applying perturbation.
+    """
+
+    def __init__(
+        self, min_formant_factor: float, max_formant_factor: float, probability: float
+    ):
+        self.min_formant_factor = min_formant_factor
+        self.max_formant_factor = max_formant_factor
+        self.probability = probability
+
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        r"""Apply formant shifting to modify speaker timbre.
+
+        Args:
+            waveform (Tensor): input waveform, shape `(1, L)`.
+            sample_rate (int): sample rate of the waveform.
+
+        Returns:
+            Tensor: waveform with modified timbre (same duration and sample rate)
+        """
+        if random.random() > self.probability:
+            return waveform
+
+        original_length = waveform.size(-1)
+
+        # Sample formant shift factor (controls vocal tract size simulation)
+        factor = random.uniform(self.min_formant_factor, self.max_formant_factor)
+
+        # Step 1: Reinterpret sample rate to shift formants
+        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
+            waveform, int(sample_rate / factor), [["rate", str(sample_rate)]]
+        )
+
+        # Step 2: WSOLA time-stretch to restore original duration
+        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
+            waveform, sample_rate, [["tempo", str(factor)]]
+        )
+
+        # Ensure exact duration preservation
+        padding = original_length - waveform.size(-1)
+        waveform = F.pad(waveform, (0, padding))
+
+        return waveform
+
+
 class NoiseInjection:
     r"""Inject background noise into the audio signal.
 
     Args:
-        noise_filepaths: List of metadata filepaths for the noise samples.
-        min_amplitude: Minimum amplitude of the noise.
-        max_amplitude: Maximum amplitude of the noise.
-        probability: Probability of applying the noise injection.
+        noise_filepaths (str): List of metadata filepaths for the noise samples.
+        min_amplitude (float): Minimum amplitude of the noise.
+        max_amplitude (float): Maximum amplitude of the noise.
+        probability (float): Probability of applying the noise injection.
     """
 
     def __init__(
@@ -160,7 +222,6 @@ class NoiseInjection:
         max_amplitude: float,
         probability: float,
     ):
-
         self.min_amplitude = min_amplitude
         self.max_amplitude = max_amplitude
         self.probability = probability
@@ -184,9 +245,9 @@ class NoiseInjection:
         noise_filepath = random.choice(self.noise_samples)
         noise_signal, noise_sample_rate = torchaudio.load(noise_filepath)
 
-        assert (
-            noise_signal.norm() > 1e-6
-        ), f"Background noise signal is empty: {noise_filepath}"
+        assert noise_signal.norm() > 1e-6, (
+            f"Background noise signal is empty: {noise_filepath}"
+        )
 
         if noise_sample_rate != sample_rate:
             noise_signal = AF.resample(noise_signal, noise_sample_rate, sample_rate)
@@ -212,8 +273,8 @@ class ImpulseResponse:
     r"""Apply the impulse response effect to the audio signal.
 
     Args:
-        rir_filepaths: List of metadata filepaths for the impulse response samples.
-        probability: Probability of applying the impulse response.
+        rir_filepaths (str): List of metadata filepaths for the impulse response samples.
+        probability (float): Probability of applying the impulse response.
     """
 
     def __init__(self, rir_filepaths: str, probability: float):
@@ -237,9 +298,9 @@ class ImpulseResponse:
         rir_filepath = random.choice(self.rir_samples)
         rir_signal, rir_sample_rate = torchaudio.load(rir_filepath)
 
-        assert (
-            rir_signal.norm() > 1e-6
-        ), f"Impulse response signal is empty: {rir_filepath}"
+        assert rir_signal.norm() > 1e-6, (
+            f"Impulse response signal is empty: {rir_filepath}"
+        )
 
         if rir_sample_rate != sample_rate:
             rir_signal = AF.resample(rir_signal, rir_sample_rate, sample_rate)
@@ -253,10 +314,10 @@ class SpecAugment:
     r"""Apply the SpecAugment effect to the audio signal.
 
     Args:
-        num_freq_mask: Number of frequency masks to apply.
-        freq_mask_width: Width of the frequency mask.
-        num_time_mask: Number of time masks to apply.
-        time_mask_width: Width of the time mask.
+        num_freq_mask (int): Number of frequency masks to apply.
+        freq_mask_width (int): Width of the frequency mask.
+        num_time_mask (int): Number of time masks to apply.
+        time_mask_width (int): Width of the time mask.
     """
 
     def __init__(
