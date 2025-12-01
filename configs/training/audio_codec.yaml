@@ -4,7 +4,7 @@ task:
   data:
     tokenizer: &tokenizer
       _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
-      model_path: models/mls_english_tokenizer.model
+      model_path: tokenizers/mls_english_tokenizer.model
       vocab_size: &vocab_size 1025  # 1024 BPE tokens + 1 blank token (index 0)
       character_coverage: 0.9995
       model_type: bpe
