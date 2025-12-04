@@ -20,8 +20,8 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 import torch
-import torchaudio
 from torch.utils.data import Dataset
+from torchcodec.decoders import AudioDecoder
 
 from soviamate.utils.helper import load_dataset, stack_batches
 
@@ -61,7 +61,14 @@ class AudioCodecDataset(Dataset):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         sample = self.dataset[idx]
 
-        audio, sample_rate = torchaudio.load_with_torchcodec(sample["audio_filepath"])
+        # Decode audio samples from file
+        decoder = AudioDecoder(
+            sample["audio_filepath"], sample_rate=16000, num_channels=1
+        )
+        signal = decoder.get_all_samples()
+
+        # Prepare source, prompt, and target audios
+        audio, sample_rate = signal.data, signal.sample_rate
         source_audio = target_audio = prompt_audio = audio.clone()
 
         # Apply content transforms if any (noise, RIR, etc.)

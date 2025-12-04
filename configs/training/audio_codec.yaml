@@ -4,14 +4,14 @@ task:
   data:
     tokenizer: &tokenizer
       _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
-      model_path: tokenizers/mls_english_tokenizer.model
+      model_path: tokenizers/emilia_english_tokenizer.model
       vocab_size: &vocab_size 1025  # 1024 BPE tokens + 1 blank token (index 0)
       character_coverage: 0.9995
       model_type: bpe
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/MLS-English/trainset.jsonl
+      filepaths: /data/Emilia-Dataset/trainset-english.jsonl
       tokenizer: *tokenizer
 
       transforms:
@@ -31,7 +31,7 @@ task:
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/MLS-English/valset.jsonl
+      filepaths: /data/Emilia-Dataset/valset-english.jsonl
       tokenizer: *tokenizer
 
     loader:
@@ -94,7 +94,7 @@ task:
     audio_quantizer:
       _target_: soviamate.modules.quantizer.FiniteScalarQuantizer
       input_dim: *d_model
-      fsq_levels: [8, 8, 8, 5, 5, 5]
+      fsq_levels: [8, 8, 8, 8, 8, 8]
       noise_dropout: 0.5
 
     speaker_adapter:
@@ -131,8 +131,8 @@ task:
       lambda_cov: 1.0
 
   optim:
-    total_steps: &total_steps 800000  # (1.024M samples / (16 batch size * 8 gpus) * 10 epochs)
-    pct_start: &pct_start 0.01  # 0.01 * 800,000 = 8,000 steps for warmup
+    total_steps: &total_steps 1000000  # (32M samples / (16 batch size * 8 gpus) * 4 epochs)
+    pct_start: &pct_start 0.01  # 0.01 * 1,000,000 = 10,000 steps for warmup
 
     generator:
       optimizer:
@@ -174,13 +174,13 @@ callbacks:
     monitor: val_loss
     save_top_k: 10
     save_last: true
-    every_n_train_steps: 80000
+    every_n_train_steps: 50000
 
 loggers:
   tb:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     save_dir: lightning_logs
-    name: audio_codec_mls
+    name: emilia_english_codec
     version: null
     default_hp_metric: false
 
@@ -189,5 +189,5 @@ trainer:
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 10
-  val_check_interval: 39999
+  max_epochs: 4
+  val_check_interval: 49999

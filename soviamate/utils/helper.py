@@ -147,18 +147,12 @@ def sample_chunk_config(
         Tuple[int, int]: (chunk_size, left_context)
     """
 
-    min_length = int(lengths.min().item())
     max_length = int(lengths.max().item())
 
     if random.random() >= full_context_prob:
-        valid_chunk_sizes = [
-            chunk_size
-            for chunk_size in dynamic_chunk_sizes
-            if chunk_size * (1 + left_context_ratio) < min_length
-        ]
+        chunk_size = random.choice(dynamic_chunk_sizes)
+        left_context = left_context_ratio * chunk_size
+    else:
+        chunk_size, left_context = max_length, 0
 
-        if valid_chunk_sizes:
-            chunk_size = random.choice(valid_chunk_sizes)
-            return chunk_size, left_context_ratio * chunk_size
-
-    return max_length, 0
+    return chunk_size, left_context
