@@ -5,94 +5,226 @@ Prepare tokenizer: extract transcripts from JSONL and train SentencePiece tokeni
 
 import argparse
 import json
+import logging
+import re
 import sys
 import tempfile
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from soviamate.datas.tokenizer import SentencePieceTokenizer
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
 
-def extract_transcripts(jsonl_file: str, output_file: str) -> int:
-    """Extract transcripts from JSONL file.
+# Constants
+MIN_TRANSCRIPT_LENGTH = 10
+LOG_INTERVAL = 100_000
+ENCODING = "utf-8"
+
+
+# ============================================================================
+# Data structures
+# ============================================================================
+
+
+class ExtractionStats(NamedTuple):
+    """Statistics from transcript extraction."""
+
+    processed: int
+    valid: int
+    skipped: int
+    total_chars: int
+
+
+@dataclass
+class TokenizerConfig:
+    """Configuration for tokenizer preparation."""
+
+    input_file: Path
+    model_dir: Path
+    model_name: str
+    vocab_size: int = 1024
+    model_type: str = "bpe"
+    character_coverage: float = 0.9995
+    normalize: bool = False
+
+
+# ============================================================================
+# Normalization
+# ============================================================================
+
+
+def normalize_transcript(text: str) -> str:
+    """Normalize English ASR transcript for training.
+
+    Args:
+        text: Raw transcript text
 
     Returns:
-        Number of valid transcripts extracted.
+        Normalized transcript text
     """
-    processed_count = 0
-    valid_count = 0
-    total_chars = 0
+    if not text:
+        return ""
 
-    print(f"Extracting transcripts from {jsonl_file}")
+    # Lowercase
+    text = text.lower()
+
+    # Remove speech annotations and parenthetical remarks
+    text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
+
+    # Remove URLs and email addresses
+    text = re.sub(r"http\S+|www\S+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", "", text)
+
+    # Remove accents/diacritics
+    text = "".join(
+        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
+    )
+
+    # Remove special characters, normalize whitespace, and strip
+    text = re.sub(r"[^a-z0-9\s\-']", "", text)
+
+    return " ".join(text.split())
+
+
+# ============================================================================
+# Extraction
+# ============================================================================
+
+
+def extract_transcripts(
+    jsonl_file: Path, output_file: Path, normalize: bool = True
+) -> ExtractionStats:
+    """Extract and normalize transcripts from JSONL file.
+
+    Args:
+        jsonl_file: Path to input JSONL file
+        output_file: Path to output transcript file
+        normalize: Whether to normalize transcripts
+
+    Returns:
+        ExtractionStats with processing results
+
+    Raises:
+        ValueError: If input file doesn't exist
+    """
+    if not jsonl_file.exists():
+        raise ValueError(f"Input file not found: {jsonl_file}")
+
+    logger.info("Extracting transcripts from %s", jsonl_file)
+    logger.info("Normalization: %s", "enabled" if normalize else "disabled")
+
+    processed, valid, skipped, total_chars = 0, 0, 0, 0
 
     with (
-        open(jsonl_file, "r", encoding="utf-8") as infile,
-        open(output_file, "w", encoding="utf-8") as outfile,
+        open(jsonl_file, "r", encoding=ENCODING) as infile,
+        open(output_file, "w", encoding=ENCODING) as outfile,
     ):
         for line_num, line in enumerate(infile, 1):
             try:
                 data = json.loads(line.strip())
                 transcript = data.get("transcript", "").strip()
 
-                if transcript and len(transcript) > 10:
-                    outfile.write(transcript + "\n")
-                    valid_count += 1
-                    total_chars += len(transcript)
+                if not transcript:
+                    skipped += 1
+                    processed += 1
+                    continue
 
-                processed_count += 1
+                text = normalize_transcript(transcript) if normalize else transcript
 
-                if processed_count % 100000 == 0:
-                    print(f"Processed: {processed_count:,}, Valid: {valid_count:,}")
+                if len(text) >= MIN_TRANSCRIPT_LENGTH:
+                    outfile.write(text + "\n")
+                    valid += 1
+                    total_chars += len(text)
+                else:
+                    skipped += 1
+
+                processed += 1
+
+                if processed % LOG_INTERVAL == 0:
+                    logger.info(
+                        "Progress: processed=%s, valid=%s, skipped=%s",
+                        processed,
+                        valid,
+                        skipped,
+                    )
 
             except json.JSONDecodeError as e:
-                print(f"Warning: Invalid JSON at line {line_num}: {e}")
+                logger.warning("Skipping invalid JSON at line %s: %s", line_num, e)
                 continue
 
-    print(f"Extracted {valid_count:,} transcripts ({total_chars:,} chars)")
-    return valid_count
+    stats = ExtractionStats(processed, valid, skipped, total_chars)
+    logger.info(
+        "Extraction complete: processed=%s, valid=%s, skipped=%s, chars=%s",
+        stats.processed,
+        stats.valid,
+        stats.skipped,
+        stats.total_chars,
+    )
+
+    return stats
 
 
-def train_tokenizer(
-    input_file: str,
-    model_dir: str,
-    model_name: str,
-    vocab_size: int = 1024,
-    model_type: str = "bpe",
-    character_coverage: float = 0.9995,
-) -> None:
-    """Train SentencePiece tokenizer."""
-    model_path = Path(model_dir)
-    model_path.mkdir(parents=True, exist_ok=True)
-    model_file = model_path / f"{model_name}.model"
+# ============================================================================
+# Training
+# ============================================================================
 
-    print(f"\nTraining tokenizer: {model_file}")
-    print(f"Vocab size: {vocab_size}, Type: {model_type}")
+
+def train_tokenizer(config: TokenizerConfig, input_file: Path) -> None:
+    """Train SentencePiece tokenizer.
+
+    Args:
+        config: TokenizerConfig with training parameters
+        input_file: Path to training data file
+    """
+    config.model_dir.mkdir(parents=True, exist_ok=True)
+    model_file = config.model_dir / f"{config.model_name}.model"
+
+    logger.info("\nTraining tokenizer: %s", model_file)
+    logger.info("Vocab size: %s, Type: %s", config.vocab_size, config.model_type)
 
     tokenizer = SentencePieceTokenizer(
         model_path=str(model_file),
-        vocab_size=vocab_size,
-        character_coverage=character_coverage,
-        model_type=model_type,
+        vocab_size=config.vocab_size,
+        character_coverage=config.character_coverage,
+        model_type=config.model_type,
     )
 
     tokenizer.train(
-        input_file=input_file,
-        model_prefix=str(model_path / model_name),
+        input_file=str(input_file),
+        model_prefix=str(config.model_dir / config.model_name),
         split_digits=True,
         treat_whitespace_as_suffix=False,
     )
 
-    print(f"Tokenizer saved to: {model_file}")
-    print(f"Actual vocabulary size: {tokenizer.vocab_size_actual}")
+    logger.info("✓ Tokenizer saved to: %s", model_file)
+    logger.info("  Vocabulary size: %s", tokenizer.vocab_size_actual)
 
 
-def main():
-    """Main entry point."""
+# ============================================================================
+# CLI
+# ============================================================================
+
+
+def main() -> int:
+    """Main entry point.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
     parser = argparse.ArgumentParser(
         description="Extract transcripts and train tokenizer"
     )
-    parser.add_argument("--input", "-i", required=True, help="Input JSONL file")
-    parser.add_argument("--model-dir", default="models", help="Model directory")
+    parser.add_argument(
+        "--input", "-i", type=Path, required=True, help="Input JSONL file"
+    )
     parser.add_argument("--model-name", required=True, help="Model name")
+    parser.add_argument(
+        "--model-dir", type=Path, default=Path("tokenizers"), help="Model directory"
+    )
     parser.add_argument("--vocab-size", type=int, default=1024, help="Vocabulary size")
     parser.add_argument(
         "--character-coverage", type=float, default=0.9995, help="Character coverage"
@@ -103,36 +235,58 @@ def main():
         choices=["bpe", "unigram", "char", "word"],
         help="Model type",
     )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Apply transcript normalization",
+    )
 
     args = parser.parse_args()
 
-    if not Path(args.input).exists():
-        print(f"Error: Input file {args.input} not found")
-        sys.exit(1)
-
-    _, transcript_file = tempfile.mkstemp(suffix=".txt")
-
     try:
-        # Step 1: Extract transcripts
-        valid_count = extract_transcripts(args.input, transcript_file)
-
-        if valid_count == 0:
-            print("Error: No valid transcripts extracted")
-            sys.exit(1)
-
-        # Step 2: Train tokenizer
-        train_tokenizer(
-            input_file=transcript_file,
+        config = TokenizerConfig(
+            input_file=args.input,
             model_dir=args.model_dir,
             model_name=args.model_name,
             vocab_size=args.vocab_size,
-            character_coverage=args.character_coverage,
             model_type=args.model_type,
+            character_coverage=args.character_coverage,
+            normalize=args.normalize,
         )
 
-    finally:
-        Path(transcript_file).unlink(missing_ok=True)
+        # Create temporary file for extracted transcripts
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding=ENCODING
+        ) as tmp:
+            transcript_file = Path(tmp.name)
+
+        try:
+            # Extract transcripts
+            stats = extract_transcripts(
+                config.input_file, transcript_file, config.normalize
+            )
+
+            if stats.valid == 0:
+                logger.error("Error: No valid transcripts extracted")
+                return 1
+
+            # Train tokenizer
+            train_tokenizer(config, transcript_file)
+            return 0
+
+        finally:
+            transcript_file.unlink(missing_ok=True)
+
+    except ValueError as e:
+        logger.error("Error: %s", e)
+        return 1
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        return 130
+    except Exception as e:
+        logger.exception("Unexpected error: %s", e)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
