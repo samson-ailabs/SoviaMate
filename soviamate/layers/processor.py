@@ -14,12 +14,14 @@
 
 """Audio processing modules for extracting spectrograms and reconstructing waveforms"""
 
+import random
 from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torchaudio.transforms as TAudio
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 
 class SpectrogramProcessor(nn.Module):
@@ -268,6 +270,92 @@ class SpecAugmentProcessor(nn.Module):
             features = torch.where(mask, self.mask_value, features)
 
         return features
+
+
+class SpliceOutProcessor(nn.Module):
+    r"""SpliceOut Audio Augmentation for ASR Decoder Training.
+
+    Removes contiguous time-step segments from feature sequences and concatenates
+    the remaining parts. More efficient than masking-based augmentation.
+
+    Args:
+        num_splices (int): Number of splices to remove. Default: 2.
+        max_splice_length (int): Maximum splice length in frames. Default: 10.
+        probability (float): Probability of applying augmentation. Default: 1.0 (always apply).
+    """
+
+    def __init__(
+        self,
+        num_splices: int = 2,
+        max_splice_length: int = 10,
+        probability: float = 1.0,
+    ):
+        super().__init__()
+        self.num_splices = num_splices
+        self.max_splice_length = max_splice_length
+        self.probability = probability
+
+    def forward(
+        self, features: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Apply SpliceOut augmentation.
+
+        Args:
+            features (Tensor): Input features with shape `(B, T, D)`.
+            lengths (Tensor): Actual sequence lengths with shape `(B,)`.
+
+        Returns:
+            Tuple of (spliced_features, new_lengths).
+        """
+        batch_size, max_len, feature_dim = features.shape
+        device = features.device
+
+        if self.num_splices == 0 or random.random() > self.probability:
+            return features, lengths
+
+        # Generate random splice lengths for each splice
+        splice_lengths = torch.randint(
+            0, self.max_splice_length, (batch_size, self.num_splices), device=device
+        )
+
+        # Calculate valid range for splice start positions
+        max_starts = torch.clamp(lengths.unsqueeze(1) - splice_lengths, min=0)
+
+        # Randomly sample start positions within valid range
+        rand_vals = torch.rand((batch_size, self.num_splices), device=device)
+        splice_starts = torch.clamp(
+            (rand_vals * (max_starts + 1)).long(), max=max_starts
+        )
+
+        # Calculate splice end positions
+        splice_ends = torch.clamp(
+            splice_starts + splice_lengths, max=lengths.unsqueeze(1)
+        )
+
+        # Create removal mask via 3D broadcasting (1, T, 1) × (B, 1, N) → (B, T, N)
+        time_idx = torch.arange(max_len, device=device).view(1, -1, 1)
+        starts_expanded = splice_starts.unsqueeze(1)
+        ends_expanded = splice_ends.unsqueeze(1)
+        in_splice = (time_idx >= starts_expanded) & (time_idx < ends_expanded)
+
+        # Mask out padding positions outside sequence boundaries
+        is_valid_pos = torch.arange(max_len, device=device) < lengths.unsqueeze(1)
+        final_mask = (~in_splice.any(dim=2)) & is_valid_pos
+
+        # Extract kept frames and split by sequence length
+        features_flat = features.reshape(-1, feature_dim)
+        mask_flat = final_mask.reshape(-1)
+        selected_frames = features_flat[mask_flat]
+
+        # Repackage into batch with new lengths and add padding
+        new_lengths = final_mask.sum(dim=1)
+        spliced_sequences = torch.split(selected_frames, new_lengths.tolist())
+
+        padded_outputs = pad_sequence(
+            spliced_sequences, batch_first=True, padding_value=0.0
+        )
+
+        return padded_outputs, new_lengths
 
 
 class AudioChunkProcessor(nn.Module):

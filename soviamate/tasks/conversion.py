@@ -15,15 +15,15 @@
 """Audio Neural Codec Models for learning audio discrete tokens"""
 
 import itertools
+import os
 import random
 from typing import Tuple
 
 import lightning as L
-from hydra.utils import instantiate
-from omegaconf import OmegaConf, DictConfig
-
 import torch
 import torch.nn.functional as F
+from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from soviamate.modules.discriminator import SEGMENT_SIZE
@@ -52,11 +52,11 @@ class AudioCodecTask(L.LightningModule):
         self.audio_loss = instantiate(model.audio_loss)
         self.adv_loss = instantiate(model.adv_loss)
 
-        # SpecAugment for hidden representations
-        if hasattr(model, "spec_augment"):
-            self.spec_augment = instantiate(model.spec_augment)
+        # SpliceOut augmentation for ASR decoder
+        if hasattr(model, "splice_out"):
+            self.splice_out = instantiate(model.splice_out)
         else:
-            self.spec_augment = None
+            self.splice_out = None
 
         # ASR decoder for auxiliary training
         if hasattr(model, "text_decoder"):
@@ -153,14 +153,16 @@ class AudioCodecTask(L.LightningModule):
         # Text recognition branch (optional)
         output_tokens, output_token_lengths = None, None
         if self.text_decoder is not None:
-            asr_features = (
-                self.spec_augment(source_features, source_feature_lengths)
-                if apply_spec_augment and self.spec_augment is not None
-                else source_features
-            )
+            if apply_splice_out and self.splice_out is not None:
+                asr_features, asr_feature_lengths = self.splice_out(
+                    source_features, source_feature_lengths
+                )
+            else:
+                asr_features = source_features
+                asr_feature_lengths = source_feature_lengths
 
             output_tokens, output_token_lengths = self.text_decoder(
-                asr_features, source_feature_lengths
+                asr_features, asr_feature_lengths
             )
 
         # Audio quantization branch
@@ -226,7 +228,7 @@ class AudioCodecTask(L.LightningModule):
             prompt_lengths,
             target_audios,
             target_lengths,
-            apply_spec_augment=True,
+            apply_splice_out=True,
         )
 
         if output_audios.size(1) != target_audios.size(1):
@@ -343,7 +345,7 @@ class AudioCodecTask(L.LightningModule):
             prompt_lengths,
             target_audios,
             target_lengths,
-            apply_spec_augment=False,
+            apply_splice_out=False,
         )
 
         if output_audios.size(1) != target_audios.size(1):
@@ -478,7 +480,7 @@ class AudioCodecTask(L.LightningModule):
 
         This method saves only the production-relevant components (encoder, quantizer,
         decoder, and optional text_decoder/speaker_adapter) along with hyperparameters.
-        Training-only components (discriminator, losses, spec_augment) are excluded.
+        Training-only components (discriminator, losses, splice_out) are excluded.
 
         Args:
             filepath: Path where to save the checkpoint.
