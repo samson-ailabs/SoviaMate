@@ -112,11 +112,11 @@ class AudioCodecTask(L.LightningModule):
         self,
         source_audios: torch.Tensor,
         source_lengths: torch.Tensor,
-        prompt_audios: torch.Tensor | None = None,
-        prompt_lengths: torch.Tensor | None = None,
-        target_audios: torch.Tensor | None = None,
-        target_lengths: torch.Tensor | None = None,
-        apply_spec_augment: bool = False,
+        prompt_audios: torch.Tensor,
+        prompt_lengths: torch.Tensor,
+        target_audios: torch.Tensor,
+        target_lengths: torch.Tensor,
+        apply_splice_out: bool = False,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
@@ -128,7 +128,7 @@ class AudioCodecTask(L.LightningModule):
         torch.Tensor | None,
     ]:
         # Encode source and target in one shot for better GPU utilization
-        if (target_audios is not None) and (self.speaker_loss is not None):
+        if self.speaker_loss is not None:
             # Batch encode: concatenate source and target
             combined_audios = torch.cat([source_audios, target_audios], dim=0)
             combined_lengths = torch.cat([source_lengths, target_lengths], dim=0)
@@ -170,14 +170,21 @@ class AudioCodecTask(L.LightningModule):
 
         # Extract prompt features (optional)
         speaker_embeddings, speaker_lengths = None, None
-        if (self.speaker_adapter is not None) and (prompt_audios is not None):
+        if self.speaker_adapter is not None:
             speaker_embeddings, speaker_lengths = self.speaker_adapter(
                 prompt_audios, prompt_lengths
             )
 
+        # Calculate maximum output length for exact reconstruction
+        max_output_length = target_lengths.max().item()
+
         # Decode to audio with prompt conditioning
         output_audios, output_audio_lengths = self.audio_decoder(
-            quantized_outputs, quantized_lengths, speaker_embeddings, speaker_lengths
+            quantized_outputs,
+            quantized_lengths,
+            speaker_embeddings,
+            speaker_lengths,
+            max_output_length,
         )
 
         return (
@@ -476,6 +483,10 @@ class AudioCodecTask(L.LightningModule):
         Args:
             filepath: Path where to save the checkpoint.
         """
+        # Ensure directory exists
+        dirpath = os.path.dirname(filepath)
+        os.makedirs(dirpath, exist_ok=True)
+
         # Build model weights for main components
         model_weights = {
             "audio_encoder": self.audio_encoder.state_dict(),
@@ -497,5 +508,9 @@ class AudioCodecTask(L.LightningModule):
         }
 
         # Save checkpoint
-        torch.save({"model_weights": model_weights, "hyper_parameters": hyper_parameters}, filepath)
+        checkpoint = {
+            "model_weights": model_weights,
+            "hyper_parameters": hyper_parameters,
+        }
+        torch.save(checkpoint, filepath)
         print(f"Exported model checkpoint to {filepath}")

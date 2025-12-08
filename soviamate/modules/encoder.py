@@ -77,10 +77,9 @@ class AudioEncoder(nn.Module):
         self.left_context_ratio = left_context_ratio
         self.full_context_prob = full_context_prob
 
-        self.specgram = SpectrogramProcessor(
-            window_size=window_size, output_dim=d_model, hop_length_ratio=4
+        self.extractor = SpectrogramProcessor(
+            hop_length=window_size, output_dim=d_model
         )
-
         self.layers = nn.ModuleList(
             [
                 ConformerLayer(
@@ -122,7 +121,7 @@ class AudioEncoder(nn.Module):
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        xs, x_lens = self.specgram(waveforms, lengths)
+        xs, x_lens = self.extractor(waveforms, lengths)
 
         if self.training:
             chunk_size, left_context = sample_chunk_config(

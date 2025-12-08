@@ -91,9 +91,8 @@ class AudioDecoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-
-        self.inverse_specgram = InverseSpectrogramProcessor(
-            window_size=window_size, input_dim=d_model, hop_length_ratio=4
+        self.vocoder = InverseSpectrogramProcessor(
+            hop_length=window_size, input_dim=d_model
         )
 
     def forward(
@@ -102,6 +101,7 @@ class AudioDecoder(nn.Module):
         embedding_lengths: torch.Tensor,
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
+        max_output_length: int = None,
     ):
         r"""Forward pass of the audio decoder.
 
@@ -113,6 +113,7 @@ class AudioDecoder(nn.Module):
             embedding_lengths (Tensor): length of the input tensor.
             prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
             prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
+            max_output_length (int, optional): Maximum output audio length for exact reconstruction.
 
         Returns:
             Tensor: output tensor with shape `(B, T * chunk_size, 1)`.
@@ -152,7 +153,7 @@ class AudioDecoder(nn.Module):
                 xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
             )
 
-        xs, x_lens = self.inverse_specgram(xs, x_lens)
+        xs, x_lens = self.vocoder(xs, x_lens, max_output_length=max_output_length)
 
         return xs, x_lens
 

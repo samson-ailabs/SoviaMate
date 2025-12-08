@@ -23,43 +23,24 @@ from torch.nn import functional as F
 
 
 class SpectrogramProcessor(nn.Module):
-    r"""Spectrogram extraction processor with frame stacking capabilities.
+    r"""Spectrogram extraction processor.
 
     Args:
-        window_size (int): Size of the window for input frames.
-        hop_length_ratio (int, optional): Ratio of window_size to hop_length.
-            Default is 4, resulting in a hop length of window_size // 4.
-        output_dim (int, optional): Output dimension after linear projection.
-            If None, no projection is applied. Default is None.
+        hop_length (int): Hop length for downsampling.
+        output_dim (int): Output dimension after linear projection.
     """
 
-    def __init__(
-        self, window_size: int, hop_length_ratio: int = 4, output_dim: int = None
-    ):
+    def __init__(self, hop_length: int, output_dim: int):
         super().__init__()
-
-        assert window_size % hop_length_ratio == 0, (
-            "window_size must be divisible by hop_length_ratio."
-        )
-
-        assert hop_length_ratio > 1, (
-            "hop_length_ratio must be greater than 1 for frame stacking."
-        )
-
-        self.window_size = window_size
-        self.hop_length_ratio = hop_length_ratio
+        self.hop_length = hop_length
 
         self.specgram = TAudio.Spectrogram(
-            n_fft=window_size,
-            win_length=window_size,
-            hop_length=window_size // hop_length_ratio,
+            n_fft=hop_length * 2,
+            win_length=hop_length * 2,
+            hop_length=hop_length,
             power=None,
         )
-
-        if output_dim is not None:
-            self.linear = nn.Linear((window_size + 2) * hop_length_ratio, output_dim)
-        else:
-            self.linear = None
+        self.linear = nn.Linear(2 * hop_length + 2, output_dim)
 
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
@@ -68,139 +49,90 @@ class SpectrogramProcessor(nn.Module):
 
         Args:
             waveforms (Tensor): Input tensor with shape `(B, T, 1)`.
-            lengths (Tensor): Length of the input tensor.
+            lengths (Tensor): Audio sample lengths with shape `(B,)`.
 
         Returns:
-            Tensor: Output tensor with shape `(B, T // window_size, D)`.
-            Tensor: Length of the output tensor.
+            Tensor: Output features with shape `(B, T // hop_length, D)`.
+            Tensor: Feature sequence lengths with shape `(B,)`.
         """
 
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        device, dtype = lengths.device, lengths.dtype
-        hop_length = self.window_size // self.hop_length_ratio
-
         # Extract spectrograms
         specs = self.specgram(waveforms.squeeze(2)).transpose(1, 2)
         mag, phase = specs.abs().clamp(1e-9).log(), specs.angle()
 
-        # Calculate output lengths
+        # Concatenate magnitude and phase
         features = torch.cat((mag, phase), dim=2)
-        lengths = torch.floor(lengths / hop_length) + 1
 
-        # Pad to ensure we can create complete stacks
-        pad_size = (
-            self.hop_length_ratio - (features.size(1) % self.hop_length_ratio)
-        ) % self.hop_length_ratio
+        # Calculate output lengths
+        output_lengths = torch.floor(lengths / self.hop_length) + 1
+        output_lengths = output_lengths.to(dtype=lengths.dtype)
 
-        if pad_size > 0:
-            features = F.pad(features, (0, 0, 0, pad_size))
+        # Apply linear projection
+        features = self.linear(features)
 
-        # Stack frames
-        batch_size, time_dim, feat_dim = features.shape
-        features = features.reshape(
-            batch_size,
-            time_dim // self.hop_length_ratio,
-            feat_dim * self.hop_length_ratio,
-        )
-
-        # Update lengths
-        lengths = torch.ceil(lengths / self.hop_length_ratio)
-        lengths = lengths.to(device=device, dtype=dtype)
-
-        # Apply linear projection if specified
-        if self.linear is not None:
-            features = self.linear(features)
-
-        return features, lengths
+        return features, output_lengths
 
 
 class InverseSpectrogramProcessor(nn.Module):
     r"""Inverse spectrogram processor for reconstructing waveforms from spectrograms.
 
     Args:
-        window_size (int): Size of the window for output frames.
-        hop_length_ratio (int, optional): Ratio of window_size to hop_length.
-            Default is 4, resulting in a hop length of window_size // 4.
-        input_dim (int, optional): Input dimension before linear projection.
-            If None, no projection is applied. Default is None.
+        hop_length (int): Hop length for upsampling.
+        input_dim (int): Input dimension before linear projection.
     """
 
-    def __init__(
-        self, window_size: int, hop_length_ratio: int = 4, input_dim: int = None
-    ):
+    def __init__(self, hop_length: int, input_dim: int):
         super().__init__()
+        self.hop_length = hop_length
 
-        assert window_size % hop_length_ratio == 0, (
-            "window_size must be divisible by hop_length_ratio."
-        )
-
-        assert hop_length_ratio > 1, (
-            "hop_length_ratio must be greater than 1 for frame stacking."
-        )
-
-        self.window_size = window_size
-        self.hop_length_ratio = hop_length_ratio
-
-        if input_dim is not None:
-            self.linear = nn.Linear(input_dim, (window_size + 2) * hop_length_ratio)
-        else:
-            self.linear = None
-
+        self.linear = nn.Linear(input_dim, 2 * hop_length + 2)
         self.inverse_specgram = TAudio.InverseSpectrogram(
-            n_fft=window_size,
-            win_length=window_size,
-            hop_length=window_size // hop_length_ratio,
+            n_fft=hop_length * 2,
+            win_length=hop_length * 2,
+            hop_length=hop_length,
         )
 
     def forward(
-        self, features: torch.Tensor, lengths: torch.Tensor
+        self,
+        features: torch.Tensor,
+        lengths: torch.Tensor,
+        max_output_length: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass of the inverse spectrogram processor.
 
         Args:
             features (Tensor): Input tensor with shape `(B, T, D)`.
-            lengths (Tensor): Length of the input tensor.
+            lengths (Tensor): Feature sequence lengths with shape `(B,)`.
+            max_output_length (int, optional): Maximum output audio length for exact reconstruction.
 
         Returns:
-            Tensor: Output waveform tensor with shape `(B, T * window_size, 1)`.
-            Tensor: Length of the output tensor.
+            Tensor: Output waveform tensor with shape `(B, max_output_length or inferred, 1)`.
+            Tensor: Output audio lengths with shape `(B,)`.
         """
 
-        # Apply linear projection if specified
-        if self.linear is not None:
-            features = self.linear(features)
+        # Apply linear projection
+        features = self.linear(features)
 
-        # Unstack frames
-        batch_size, time_dim, feat_dim = features.shape
-        features = features.reshape(
-            batch_size,
-            time_dim * self.hop_length_ratio,
-            feat_dim // self.hop_length_ratio,
-        )
-
-        # Update lengths
-        lengths = lengths * self.hop_length_ratio
-
-        # Split into magnitude and phase
-        mag, phase = features.split(self.window_size // 2 + 1, dim=2)
-
-        # Convert to complex spectrogram
-        real = mag.exp() * torch.cos(phase)
-        imag = mag.exp() * torch.sin(phase)
-
-        # Stack real and imaginary parts
-        specs = torch.stack([real, imag], dim=-1)
-        specs = torch.view_as_complex(specs.contiguous())
+        # Convert back to complex spectrogram
+        magnitude, phase = features.chunk(2, dim=2)
+        spectrogram = torch.polar(magnitude.exp(), phase)
 
         # Convert to waveform
-        waveforms = self.inverse_specgram(specs.transpose(1, 2)).unsqueeze(2)
+        waveforms = self.inverse_specgram(
+            spectrogram.transpose(1, 2), length=max_output_length
+        )
 
         # Calculate output lengths
-        lengths = (lengths - 1) * (self.window_size // self.hop_length_ratio)
+        output_lengths = (lengths - 1) * self.hop_length
 
-        return waveforms, lengths
+        # Clamp to actual waveform size if max_output_length is provided
+        if max_output_length is not None:
+            output_lengths = torch.clamp(output_lengths, max=max_output_length)
+
+        return waveforms.unsqueeze(2), output_lengths
 
 
 class SpecAugmentProcessor(nn.Module):
