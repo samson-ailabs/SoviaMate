@@ -41,13 +41,19 @@ task:
 
   model:
     d_model: &d_model 1024
-    window_size: &window_size 640
+
+    frame_stacking: &frame_stacking 4
+    window_length: &window_length 400
+    hop_length: &hop_length 160
+
     dynamic_chunk_sizes: &dynamic_chunk_sizes [4, 8, 12, 16]
     full_context_prob: &full_context_prob 0.2
 
     audio_encoder:
       _target_: soviamate.modules.encoder.AudioEncoder
-      window_size: *window_size
+      frame_stacking: *frame_stacking
+      window_length: *window_length
+      hop_length: *hop_length
       num_layers: 4
       d_model: *d_model
       ffn_dim: 4096
@@ -79,7 +85,9 @@ task:
 
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
-      window_size: *window_size
+      frame_stacking: *frame_stacking
+      window_length: *window_length
+      hop_length: *hop_length
       num_layers: 4
       d_model: *d_model
       ffn_dim: 4096
@@ -94,7 +102,7 @@ task:
     audio_quantizer:
       _target_: soviamate.modules.quantizer.FiniteScalarQuantizer
       input_dim: *d_model
-      fsq_levels: [8, 8, 8, 8, 8, 8]
+      fsq_levels: [16, 16, 16, 16, 16, 16, 16, 16]
       noise_dropout: 0.5
 
     speaker_adapter:
@@ -174,7 +182,7 @@ callbacks:
     monitor: val_loss
     save_top_k: 10
     save_last: true
-    every_n_train_steps: 50000
+    every_n_train_steps: 75000
 
 loggers:
   tb:
@@ -190,4 +198,4 @@ trainer:
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
   max_epochs: 4
-  val_check_interval: 49999
+  val_check_interval: 50000

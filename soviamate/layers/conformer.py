@@ -160,14 +160,14 @@ class ConvolutionModule(nn.Module):
 
         self.left_context = kernel_size - 1
 
-        self.layer_norm1 = nn.InstanceNorm1d(input_dim)
+        self.layer_norm = nn.LayerNorm(input_dim)
         self.pointwise_conv1 = nn.Conv1d(input_dim, input_dim, 1)
         self.activation1 = nn.GELU()
         self.depthwise_conv = nn.Conv1d(
             input_dim, input_dim, kernel_size, groups=input_dim
         )
 
-        self.layer_norm2 = nn.InstanceNorm1d(input_dim)
+        self.batch_norm = nn.BatchNorm1d(input_dim)
         self.activation2 = nn.GELU()
         self.pointwise_conv2 = nn.Conv1d(input_dim, input_dim, 1)
 
@@ -188,9 +188,9 @@ class ConvolutionModule(nn.Module):
             torch.Tensor: outputs, with shape `(B, T, D)`.
         """
 
-        x = inputs.transpose(1, 2)
+        x = self.layer_norm(inputs)
+        x = x.transpose(1, 2)
 
-        x = self.layer_norm1(x)
         x = self.pointwise_conv1(x)
         x = self.activation1(x)
 
@@ -205,7 +205,7 @@ class ConvolutionModule(nn.Module):
             cache = contexts
 
         x = self.depthwise_conv(x)
-        x = self.layer_norm2(x)
+        x = self.batch_norm(x)
         x = self.activation2(x)
 
         x = self.pointwise_conv2(x)

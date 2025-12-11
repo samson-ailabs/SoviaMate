@@ -16,12 +16,10 @@
 
 import itertools
 import os
-import random
 from typing import Tuple
 
 import lightning as L
 import torch
-import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
@@ -200,7 +198,7 @@ class AudioCodecTask(L.LightningModule):
             target_feature_lengths,
         )
 
-    def training_step(self, batch: Tuple[torch.Tensor, ...]):
+    def training_step(self, batch: Tuple[torch.Tensor, ...], batch_idx: int):
         (
             source_audios,
             source_lengths,
@@ -231,10 +229,6 @@ class AudioCodecTask(L.LightningModule):
             apply_splice_out=True,
         )
 
-        if output_audios.size(1) != target_audios.size(1):
-            padding = target_audios.size(1) - output_audios.size(1)
-            output_audios = F.pad(output_audios, (0, 0, 0, padding))
-
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)
 
@@ -244,7 +238,7 @@ class AudioCodecTask(L.LightningModule):
         # Train discriminator
         self.toggle_optimizer(disc_optim)
 
-        if self.global_step == 0 or random.random() < 0.5:
+        if batch_idx % 2 == 0:  # Update discriminator every 2 steps
             fake_segments, real_segments = self._get_random_segments(
                 output_audios, target_audios, target_lengths
             )
@@ -347,10 +341,6 @@ class AudioCodecTask(L.LightningModule):
             target_lengths,
             apply_splice_out=False,
         )
-
-        if output_audios.size(1) != target_audios.size(1):
-            padding = target_audios.size(1) - output_audios.size(1)
-            output_audios = F.pad(output_audios, (0, 0, 0, padding))
 
         output_audios = output_audios.transpose(1, 2)
         target_audios = target_audios.transpose(1, 2)

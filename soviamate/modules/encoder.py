@@ -34,7 +34,9 @@ class AudioEncoder(nn.Module):
     Uses dynamic chunk training for unified streaming and non-streaming models.
 
     Args:
-        window_size (int): size of the window for input frames.
+        frame_stacking (int): number of frames to stack for downsampling.
+        window_length (int): window length for STFT (n_fft).
+        hop_length (int): hop length for STFT.
         num_layers (int): number of conformer layers.
         d_model (int): embedding dimension for the conformer layers.
         ffn_dim (int): hidden dimension for the feed-forward module.
@@ -50,7 +52,9 @@ class AudioEncoder(nn.Module):
 
     def __init__(
         self,
-        window_size: int,
+        frame_stacking: int,
+        window_length: int,
+        hop_length: int,
         num_layers: int,
         d_model: int,
         ffn_dim: int,
@@ -68,7 +72,7 @@ class AudioEncoder(nn.Module):
         self.streaming_chunk_size = None
         self.streaming_left_context = None
 
-        self.window_size = window_size
+        self.frame_shift = hop_length * frame_stacking
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
@@ -78,8 +82,12 @@ class AudioEncoder(nn.Module):
         self.full_context_prob = full_context_prob
 
         self.extractor = SpectrogramProcessor(
-            hop_length=window_size, output_dim=d_model
+            frame_stacking=frame_stacking,
+            window_length=window_length,
+            hop_length=hop_length,
+            output_dim=d_model,
         )
+
         self.layers = nn.ModuleList(
             [
                 ConformerLayer(
@@ -176,7 +184,7 @@ class AudioEncoder(nn.Module):
         """
 
         batch_size, device = segments.size(0), segments.device
-        valid_segment_length = self.streaming_chunk_size * self.window_size
+        valid_segment_length = self.streaming_chunk_size * self.frame_shift
 
         if self.streaming_chunk_size is None or self.streaming_left_context is None:
             raise ValueError("The streaming configuration is not set.")

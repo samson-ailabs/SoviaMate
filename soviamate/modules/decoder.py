@@ -34,7 +34,9 @@ class AudioDecoder(nn.Module):
     Uses dynamic chunk training for unified streaming and non-streaming models.
 
     Args:
-        window_size (int): window size for the input frames.
+        frame_stacking (int): number of frames to unstack for upsampling.
+        window_length (int): window length for iSTFT (n_fft).
+        hop_length (int): hop length for iSTFT.
         num_layers (int): number of conformer layers.
         d_model (int): embedding dimension for the conformer layers.
         ffn_dim (int): hidden dimension for the feed-forward module.
@@ -50,7 +52,9 @@ class AudioDecoder(nn.Module):
 
     def __init__(
         self,
-        window_size: int,
+        frame_stacking: int,
+        window_length: int,
+        hop_length: int,
         num_layers: int,
         d_model: int,
         ffn_dim: int,
@@ -68,7 +72,7 @@ class AudioDecoder(nn.Module):
         self.streaming_chunk_size = None
         self.streaming_left_context = None
 
-        self.window_size = window_size
+        self.frame_shift = hop_length * frame_stacking
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
@@ -91,8 +95,12 @@ class AudioDecoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
+
         self.vocoder = InverseSpectrogramProcessor(
-            hop_length=window_size, input_dim=d_model
+            frame_stacking=frame_stacking,
+            window_length=window_length,
+            hop_length=hop_length,
+            input_dim=d_model,
         )
 
     def forward(
