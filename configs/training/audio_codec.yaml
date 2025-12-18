@@ -116,16 +116,14 @@ task:
       _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminator
       n_ffts: [128, 256, 512, 1024, 2048, 4096]
       hop_lengths: [64, 128, 256, 512, 1024, 2048]
-      win_lengths: [128, 256, 512, 1024, 2048, 4096]
 
     audio_loss:
-      _target_: soviamate.modules.criterion.MelSpectralEnergyLoss
+      _target_: soviamate.modules.criterion.MelSpectralEnergyDistanceLoss
       sample_rate: 16000
-      fft_sizes: [64, 128, 256, 512, 1024, 2048]
-      mel_bins: [8, 16, 32, 64, 128, 256]
+      window_sizes: [64, 128, 256, 512, 1024, 2048]
 
     adv_loss:
-      _target_: soviamate.modules.criterion.LeastSquaresGANLoss
+      _target_: soviamate.modules.criterion.HingeAdversarialLoss
 
     text_loss:
       _target_: soviamate.modules.criterion.SequenceToSequenceLoss
@@ -151,7 +149,7 @@ task:
 
       scheduler:
         _target_: torch.optim.lr_scheduler.OneCycleLR
-        max_lr: 3e-5
+        max_lr: 1e-5
         total_steps: *total_steps
         pct_start: *pct_start
         div_factor: 100
@@ -166,7 +164,7 @@ task:
 
       scheduler:
         _target_: torch.optim.lr_scheduler.OneCycleLR
-        max_lr: 3e-5
+        max_lr: 1e-5
         total_steps: *total_steps
         pct_start: *pct_start
         div_factor: 100

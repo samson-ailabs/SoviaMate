@@ -14,6 +14,7 @@
 
 """Loss Functions for different tasks"""
 
+import math
 from typing import List
 
 import torch
@@ -24,42 +25,77 @@ import torchaudio.transforms as T
 from soviamate.utils.helper import make_padding_mask
 
 
-class LeastSquaresGANLoss(nn.Module):
-    r"""Least Squares GAN loss for Generative Adversarial Networks."""
+class HingeAdversarialLoss(nn.Module):
+    r"""Hinge GAN loss for multi-scale discriminators."""
 
     def forward(
-        self, outputs: torch.Tensor, targets: torch.Tensor | None = None
+        self,
+        fake_logits: List[torch.Tensor],
+        real_logits: List[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        r"""Compute the hinge adversarial loss.
+
+        Args:
+            fake_logits: List of discriminator outputs for fake samples.
+            real_logits: List of discriminator outputs for real samples.
+                If None, computes generator loss; otherwise discriminator loss.
+
+        Returns:
+            Tensor: Hinge adversarial loss.
+        """
+        loss = 0.0
+
+        if real_logits is None:
+            # Generator loss: max(0, 1 - D(fake))
+            for fake in fake_logits:
+                loss += F.relu(1.0 - fake).mean()
+        else:
+            # Discriminator loss: max(0, 1 - D(real)) + max(0, 1 + D(fake))
+            for real, fake in zip(real_logits, fake_logits):
+                loss += F.relu(1.0 - real).mean() + F.relu(1.0 + fake).mean()
+
+        return loss / len(fake_logits)
+
+
+class LeastSquaresAdversarialLoss(nn.Module):
+    r"""Least Squares GAN loss for multi-scale discriminators."""
+
+    def forward(
+        self,
+        fake_logits: List[torch.Tensor],
+        real_logits: List[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         r"""Compute the least squares GAN loss.
 
         Args:
-            outputs (Tensor): outputs of the discriminator for fake samples.
-            targets (Tensor, optional): outputs of the discriminator for real samples.
+            fake_logits: List of discriminator outputs for fake samples.
+            real_logits: List of discriminator outputs for real samples.
+                If None, computes generator loss; otherwise discriminator loss.
 
         Returns:
             Tensor: Least squares GAN loss.
         """
+        loss = 0.0
 
-        if targets is None:
-            loss = torch.mean((outputs - 1) ** 2)
+        if real_logits is None:
+            # Generator loss: fake should be classified as real
+            for fake in fake_logits:
+                loss += torch.mean((fake - 1) ** 2)
         else:
-            loss = torch.mean((targets - 1) ** 2) + torch.mean(outputs**2)
+            # Discriminator loss: real -> 1, fake -> 0
+            for real, fake in zip(real_logits, fake_logits):
+                loss += torch.mean((real - 1) ** 2) + torch.mean(fake**2)
 
-        return loss
+        return loss / len(fake_logits)
 
 
-class MelSpectralEnergyLoss(nn.Module):
-    """
-    Multi-Resolution Mel-Spectrogram Loss for audio reconstruction.
-
-    Combines both mel-spectrogram reconstruction loss and multi-scale spectral losses
-    as described in the research. Uses variable window sizes with proportional hop lengths
-    and mel bin sizes to better capture frequency information at multiple time-scales.
+class MultiScaleMelSpectrogramLoss(nn.Module):
+    """Multi-resolution mel-spectrogram loss for audio reconstruction.
 
     Args:
-        sample_rate (int): Sample rate of the audio signals.
-        window_lengths (List[int]): List of window lengths for STFT.
-        mel_bins (List[int]): List of mel bin sizes corresponding to each window length.
+        sample_rate: Audio sample rate in Hz.
+        fft_sizes: List of FFT sizes for each resolution.
+        mel_bins: List of mel bin counts corresponding to each FFT size.
     """
 
     def __init__(self, sample_rate: int, fft_sizes: List[int], mel_bins: List[int]):
@@ -68,10 +104,6 @@ class MelSpectralEnergyLoss(nn.Module):
         assert len(fft_sizes) == len(mel_bins), (
             "fft_sizes and mel_bins must have same length"
         )
-
-        self.sample_rate = sample_rate
-        self.fft_sizes = fft_sizes
-        self.mel_bins = mel_bins
 
         self.mel_spectrograms = nn.ModuleList()
         for fft_size, n_mels in zip(fft_sizes, mel_bins):
@@ -83,56 +115,130 @@ class MelSpectralEnergyLoss(nn.Module):
                     hop_length=fft_size // 4,
                     n_mels=n_mels,
                     power=1.0,
-                    norm="slaney",
-                    mel_scale="slaney",
                 )
             )
 
     def forward(
         self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Compute the multi-resolution mel-spectrogram loss.
+        """Compute multi-resolution mel-spectrogram loss.
 
         Args:
-            outputs (Tensor): waveform outputs, shape `(B, 1, T)`.
-            targets (Tensor): waveform targets, shape `(B, 1, T)`.
-            lengths (Tensor): lengths of the waveform targets, shape `(B,)`.
+            outputs: Predicted waveforms of shape `(B, 1, T)`.
+            targets: Target waveforms of shape `(B, 1, T)`.
+            lengths: Valid lengths per sample of shape `(B,)`.
 
         Returns:
-            Tensor: Combined multi-resolution mel-spectrogram loss
+            Scalar loss value summed across all resolutions.
         """
-
-        # Remove channel dimension if present
+        # Squeeze channel dimension if present
         if outputs.dim() == 3:
             outputs = outputs.squeeze(1)
         if targets.dim() == 3:
             targets = targets.squeeze(1)
 
-        # Create masks from lengths if provided
+        # Create masks from lengths
         masks = make_padding_mask(lengths)
         masks = (~masks[:, None, :]).float()
 
-        # Calculate loss at each resolution
         total_loss = 0.0
 
         for mel_spectrogram in self.mel_spectrograms:
-            # Compute mel spectrograms
-            mel_outputs = mel_spectrogram(outputs).clamp(min=1e-5).log()
-            mel_targets = mel_spectrogram(targets).clamp(min=1e-5).log()
+            mel_outputs = mel_spectrogram(outputs)
+            mel_targets = mel_spectrogram(targets)
+
+            # Convert to log magnitude (dB scale)
+            log_mel_outputs = mel_outputs.clamp(min=1e-5).log10()
+            log_mel_targets = mel_targets.clamp(min=1e-5).log10()
 
             # Resize mask to match spectrogram dimensions
-            curr_masks = F.interpolate(masks, size=mel_outputs.size(2))
-            curr_masks = curr_masks.bool().expand_as(mel_outputs)
+            curr_masks = F.interpolate(masks, size=log_mel_outputs.size(2))
+            curr_masks = curr_masks.expand_as(log_mel_outputs)
 
-            # Compute L1 loss between mel spectrograms
-            loss = F.l1_loss(mel_outputs, mel_targets, reduction="none")
-            loss = (loss * curr_masks).sum() / curr_masks.sum()
-
-            # Combine losses across resolutions
-            total_loss += loss
+            # Compute masked L1 loss
+            loss = F.l1_loss(log_mel_outputs, log_mel_targets, reduction="none")
+            total_loss += (loss * curr_masks).sum() / curr_masks.sum()
 
         return total_loss
+
+
+class MelSpectralEnergyDistanceLoss(nn.Module):
+    """Multi-scale mel spectral energy distance loss from SpectroStream.
+
+    Args:
+        sample_rate: Audio sample rate in Hz.
+        window_sizes: List of STFT window sizes.
+        n_mels: Number of mel bins. Default: 64.
+    """
+
+    def __init__(self, sample_rate: int, window_sizes: List[int], n_mels: int = 64):
+        super().__init__()
+
+        self.register_buffer(
+            "alphas", torch.tensor([math.sqrt(s / 2) for s in window_sizes])
+        )
+
+        self.mel_spectrograms = nn.ModuleList()
+        for window_size in window_sizes:
+            self.mel_spectrograms.append(
+                T.MelSpectrogram(
+                    sample_rate=sample_rate,
+                    n_fft=max(512, window_size),
+                    win_length=window_size,
+                    hop_length=window_size // 4,
+                    n_mels=n_mels,
+                    power=1.0,
+                )
+            )
+
+    def forward(
+        self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute mel spectral energy distance loss.
+
+        Args:
+            outputs: Predicted waveforms of shape `(B, T)` or `(B, 1, T)`.
+            targets: Target waveforms of shape `(B, T)` or `(B, 1, T)`.
+            lengths: Valid lengths per sample of shape `(B,)`.
+
+        Returns:
+            Scalar loss value summed across all scales.
+        """
+        # Handle channel dimension
+        if outputs.dim() == 3:
+            outputs = outputs.squeeze(1)
+        if targets.dim() == 3:
+            targets = targets.squeeze(1)
+
+        # Create mask from waveform lengths
+        masks = make_padding_mask(lengths)
+        masks = (~masks[:, None, :]).float()
+
+        l1_loss = 0.0
+        l2_loss = 0.0
+
+        for i, mel_spec in enumerate(self.mel_spectrograms):
+            # Compute mel spectrograms: (B, n_mels, T_mel)
+            mel_output = mel_spec(outputs)
+            mel_target = mel_spec(targets)
+
+            # Resize mask to match spectrogram dimensions
+            mask = F.interpolate(masks, size=mel_output.size(2))
+            mask = mask.expand_as(mel_output)
+
+            # Number of valid elements
+            numels = mask.sum().clamp(min=1.0)
+
+            l1 = F.l1_loss(mel_output, mel_target, reduction="none")
+            l1_loss += (l1 * mask).sum() / numels
+
+            log_mel_output = mel_output.clamp(min=1e-5).log()
+            log_mel_target = mel_target.clamp(min=1e-5).log()
+
+            l2 = F.mse_loss(log_mel_output, log_mel_target, reduction="none")
+            l2_loss += self.alphas[i] * torch.sqrt((l2 * mask).sum()) / numels
+
+        return l1_loss + l2_loss
 
 
 class SequenceToSequenceLoss(nn.Module):

@@ -26,80 +26,53 @@ LRELU_SLOPE = 0.2
 SEGMENT_SIZE = 16384
 
 
-class _ResBlockDown(nn.Module):
+class _DownsampleBlock(nn.Module):
+    """Residual block with 2x spatial downsampling and 2x channel expansion."""
+
     def __init__(self, in_channels: int, out_channels: int) -> None:
-        assert out_channels // in_channels == 2, (
-            "Output channels must be twice the input channels"
-        )
-
         super().__init__()
-        self.leaky_relu = nn.LeakyReLU(negative_slope=LRELU_SLOPE)
+        self.channel_ratio = out_channels // in_channels
 
-        self.skip_pool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
-        self.skip_conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.pool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
+        self.skip_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
 
-        self.res_pool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
-        self.res_conv = nn.Conv2d(
+        self.conv1 = nn.Conv2d(
             in_channels, out_channels, kernel_size=3, stride=2, padding=1
         )
-        self.res_proj = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Forward pass of the downsample block.
+        """Apply 2x downsampling with residual connection.
 
         Args:
-            x (Tensor): input tensor
+            x (Tensor): Input tensor of shape (B, C, H, W).
 
         Returns:
-            Tensor: output tensor
+            Tensor: Downsampled tensor of shape (B, 2C, H/2, W/2).
         """
+        # Skip path: pool → project → concat
+        pooled = self.pool(x)
+        skip = torch.cat([pooled, self.skip_conv(pooled)], dim=1)
 
-        x1 = self._skip_connection(x)
-        x2 = self._residual_connection(x)
+        # Residual path: activate → conv + pool → activate → project
+        h = F.leaky_relu(x, negative_slope=LRELU_SLOPE)
+        h = self.conv1(h) + self.pool(h).repeat_interleave(self.channel_ratio, dim=1)
+        residual = self.conv2(F.leaky_relu(h, negative_slope=LRELU_SLOPE))
 
-        x = F.normalize(x1 + 0.4 * x2, p=2, dim=1)
-
-        return x
-
-    def _skip_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.skip_pool(x)
-        x2 = self.skip_conv(x1)
-
-        out = torch.cat((x1, x2), dim=1)
-
-        return out
-
-    def _residual_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.leaky_relu(x)
-
-        x1 = self.res_conv(x)
-        x2 = self.res_pool(x)
-
-        x = x1 + x2.repeat_interleave(2, dim=1)
-        x = self.leaky_relu(x)
-
-        out = self.res_proj(x)
-
-        return out
+        return F.normalize(skip + 0.4 * residual, p=2, dim=1)
 
 
-class _ResBlockUp(nn.Module):
+class _UpsampleBlock(nn.Module):
+    """Residual block with 2x spatial upsampling and channel reduction."""
+
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.factor = in_channels // out_channels
-        self.leaky_relu = nn.LeakyReLU(negative_slope=LRELU_SLOPE)
+        self.channel_ratio = in_channels // out_channels
 
-        self.skip_upsm = nn.Upsample(scale_factor=2, mode="nearest")
-        self.skip_conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=1, stride=1, padding=0
-        )
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
-        self.res_upsm = nn.Upsample(scale_factor=2, mode="nearest")
-        self.res_conv = nn.ConvTranspose2d(
+        self.conv1 = nn.ConvTranspose2d(
             in_channels,
             out_channels,
             kernel_size=3,
@@ -107,413 +80,538 @@ class _ResBlockUp(nn.Module):
             padding=1,
             output_padding=1,
         )
-        self.res_proj = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Forward pass of the upsample block.
+        """Apply 2x upsampling with residual connection.
 
         Args:
-            x (Tensor): input tensor
+            x (Tensor): Input tensor of shape (B, C, H, W).
 
         Returns:
-            Tensor: output tensor
+            Tensor: Upsampled tensor of shape (B, C/2, 2H, 2W).
         """
+        # Skip path: project → upsample
+        skip = self.upsample(self.skip_conv(x))
 
-        x1 = self._skip_connection(x)
-        x2 = self._residual_connection(x)
+        # Residual path: activate → conv + upsample → activate → project
+        h = F.leaky_relu(x, negative_slope=LRELU_SLOPE)
+        h = self.conv1(h) + self.upsample(h)[:, :: self.channel_ratio, :, :]
+        residual = self.conv2(F.leaky_relu(h, negative_slope=LRELU_SLOPE))
 
-        x = F.normalize(x1 + 0.4 * x2, p=2, dim=1)
-
-        return x
-
-    def _skip_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.skip_conv(x)
-        out = self.skip_upsm(x)
-        return out
-
-    def _residual_connection(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.leaky_relu(x)
-
-        x1 = self.res_conv(x)
-        x2 = self.res_upsm(x)
-
-        x = x1 + x2[:, :: self.factor, :, :]
-        x = self.leaky_relu(x)
-
-        out = self.res_proj(x)
-
-        return out
+        return F.normalize(skip + 0.4 * residual, p=2, dim=1)
 
 
-class SpecUnetDisc(nn.Module):
-    r"""A U-Net based discriminator that operates on the spectrogram domain.
+class SpectralPyramidDiscriminator(nn.Module):
+    """Single-scale U-Net discriminator for spectral analysis.
+
+    Uses U-Net encoder-decoder with skip connections to capture features
+    at a specific frequency resolution.
 
     Args:
-        n_ffts (List[int]): list of FFT sizes for each spectrogram
-        win_lengths (List[int]): list of window lengths for each spectrogram
-        hop_lengths (List[int]): list of hop lengths for each spectrogram
+        win_length: Window length for STFT
+        hop_length: Hop length for STFT
     """
 
-    def __init__(
-        self, n_ffts: List[int], win_lengths: List[int], hop_lengths: List[int]
-    ) -> None:
-        super().__init__()
-
-        assert len(n_ffts) == len(win_lengths) == len(hop_lengths), (
-            "Lengths of n_ffts, win_lengths, and hop_lengths must be the same"
-        )
-
-        self.spectrograms = nn.ModuleList()
-        for n_fft, win_length, hop_length in zip(n_ffts, win_lengths, hop_lengths):
-            self.spectrograms.append(
-                T.Spectrogram(
-                    n_fft=n_fft,
-                    win_length=win_length,
-                    hop_length=hop_length,
-                    power=None,
-                )
-            )
-
-        self.conv1 = nn.Conv2d(2, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 1, kernel_size=3, padding=1)
-
-        self.down1 = _ResBlockDown(64, 128)
-        self.down2 = _ResBlockDown(128, 256)
-        self.down3 = _ResBlockDown(256, 512)
-        self.down4 = _ResBlockDown(512, 1024)
-
-        self.ccat1 = nn.Conv2d(1024, 512, kernel_size=1, stride=1)
-        self.ccat2 = nn.Conv2d(512, 256, kernel_size=1, stride=1)
-        self.ccat3 = nn.Conv2d(256, 128, kernel_size=1, stride=1)
-
-        self.upsm1 = _ResBlockUp(1024, 512)
-        self.upsm2 = _ResBlockUp(512, 256)
-        self.upsm3 = _ResBlockUp(256, 128)
-        self.upsm4 = _ResBlockUp(128, 64)
-
-    def _forward_spectrogram(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.view_as_real(x)
-        x = x.permute(0, 3, 1, 2)
-
-        x = x.contiguous()
-        x0 = self.conv1(x)
-
-        x1 = self.down1(x0)
-        x2 = self.down2(x1)
-        x3 = self.down3(x2)
-        x4 = self.down4(x3)
-
-        y0 = x4
-
-        y1 = self.upsm1(y0)
-        y1 = self.ccat1(torch.cat((x3, y1), dim=1))
-        y2 = self.upsm2(y1)
-        y2 = self.ccat2(torch.cat((x2, y2), dim=1))
-        y3 = self.upsm3(y2)
-        y3 = self.ccat3(torch.cat((x1, y3), dim=1))
-        y4 = self.upsm4(y3)
-
-        x = self.conv2(y4)
-        x = x.flatten(start_dim=1)
-
-        return x
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Forward pass of the discriminator.
-
-        Args:
-            x (Tensor): waveform input tensor, shape (B, 1, T)
-
-        Returns:
-            Tensor: latent output tensor, shape (B, T')
-        """
-
-        outs = []
-        for spectrogram in self.spectrograms:
-            spec = spectrogram(x.squeeze(1))[:, :-1, :-1]
-            outs.append(self._forward_spectrogram(spec))
-
-        outs = torch.cat(outs, dim=1)
-
-        return outs
-
-
-class SpectralDiscriminator(nn.Module):
-    r"""A spectral discriminator that operates on the spectrogram domain.
-
-    Args:
-        n_fft (int): FFT size for STFT
-        hop_length (int): hop length for STFT
-        win_length (int): window length for STFT
-    """
-
-    def __init__(self, n_fft: int, hop_length: int, win_length: int) -> None:
+    def __init__(self, win_length: int, hop_length: int) -> None:
         super().__init__()
 
         self.stft = T.Spectrogram(
-            n_fft=n_fft,
-            win_length=win_length,
-            hop_length=hop_length,
-            power=None,
+            n_fft=win_length, win_length=win_length, hop_length=hop_length, power=None
         )
 
-        self.pre_conv = weight_norm(
-            nn.Conv2d(2, 32, kernel_size=(3, 9), padding=(1, 4))
-        )
+        # Input/output projections
+        self.input_conv = nn.Conv2d(2, 64, kernel_size=3, padding=1)
+        self.output_conv = nn.Conv2d(64, 1, kernel_size=3, padding=1)
 
-        channels = [32, 64, 128, 256]
-        self.conv_blocks = nn.ModuleList()
+        # Encoder (downsampling path): 64 → 128 → 256 → 512
+        self.down1 = _DownsampleBlock(64, 128)
+        self.down2 = _DownsampleBlock(128, 256)
+        self.down3 = _DownsampleBlock(256, 512)
 
-        for i in range(len(channels) - 1):
-            conv_block = nn.Sequential(
-                weight_norm(
-                    nn.Conv2d(
-                        channels[i],
-                        channels[i + 1],
-                        kernel_size=(3, 9),
-                        stride=(1, 2),
-                        padding=(1, 4),
-                    )
-                ),
-                nn.LeakyReLU(negative_slope=LRELU_SLOPE),
-            )
-            self.conv_blocks.append(conv_block)
+        # Skip connection projections (reduce concatenated channels)
+        self.skip_proj1 = nn.Conv2d(512, 256, kernel_size=1)
+        self.skip_proj2 = nn.Conv2d(256, 128, kernel_size=1)
+        self.skip_proj3 = nn.Conv2d(128, 64, kernel_size=1)
 
-        self.post_conv = weight_norm(
-            nn.Conv2d(256, 1, kernel_size=(3, 3), padding=(1, 1))
-        )
+        # Decoder (upsampling path): 512 → 256 → 128 → 64
+        self.up1 = _UpsampleBlock(512, 256)
+        self.up2 = _UpsampleBlock(256, 128)
+        self.up3 = _UpsampleBlock(128, 64)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Forward pass of the discriminator.
+        """Process waveform through spectral U-Net.
 
         Args:
-            x (Tensor): waveform input tensor, shape (B, 1, T)
+            x (Tensor): Input waveform of shape (B, 1, T).
 
         Returns:
-            Tensor: latent output tensor, shape (B, T')
+            Tensor: Per-pixel logits, shape (B, N).
         """
+        spec = self.stft(x.squeeze(1))[:, :-1, :-1]
 
-        x = self.stft(x.squeeze(1))
-        x = x[:, :-1, :-1]
+        h = torch.view_as_real(spec).permute(0, 3, 1, 2)
+        e0 = self.input_conv(h.contiguous())
 
-        x = torch.view_as_real(x)
-        x = x.permute(0, 3, 1, 2)
+        # Encoder
+        e1 = self.down1(e0)
+        e2 = self.down2(e1)
+        e3 = self.down3(e2)
 
-        x = x.contiguous()
-        x = self.pre_conv(x)
+        # Decoder with skip connections
+        d1 = self.skip_proj1(torch.cat([e2, self.up1(e3)], dim=1))
+        d2 = self.skip_proj2(torch.cat([e1, self.up2(d1)], dim=1))
+        d3 = self.skip_proj3(torch.cat([e0, self.up3(d2)], dim=1))
 
-        for block in self.conv_blocks:
-            x = block(x)
-
-        x = self.post_conv(x)
-        x = x.flatten(start_dim=1)
-
-        return x
+        return self.output_conv(d3).flatten(start_dim=1)
 
 
-class MultiSpectralDiscriminator(nn.Module):
-    r"""Multiple of Spectral STFT Discriminators.
+class MultiSpectralPyramidDiscriminator(nn.Module):
+    """Multi-scale spectral pyramid discriminator.
+
+    Each scale has its own U-Net discriminator with independent weights.
 
     Args:
-        n_ffts (List[int] | None): List of FFT sizes for each sub-discriminator
-        hop_lengths (List[int] | None): List of hop lengths for each sub-discriminator
-        win_lengths (List[int] | None): List of window lengths for each sub-discriminator
+        win_lengths: Window lengths for each scale
+        hop_lengths: Hop lengths for each scale
     """
 
-    def __init__(
-        self,
-        n_ffts: List[int] | None = None,
-        hop_lengths: List[int] | None = None,
-        win_lengths: List[int] | None = None,
-    ):
+    def __init__(self, win_lengths: List[int], hop_lengths: List[int]) -> None:
         super().__init__()
+        assert len(win_lengths) == len(hop_lengths)
 
-        assert len(n_ffts) == len(hop_lengths) == len(win_lengths), (
-            "All parameter lists must have the same length"
+        self.discriminators = nn.ModuleList(
+            [
+                SpectralPyramidDiscriminator(w, h)
+                for w, h in zip(win_lengths, hop_lengths)
+            ]
         )
 
-        self.sub_discriminators = nn.ModuleList()
-        for n_fft, hop_length, win_length in zip(n_ffts, hop_lengths, win_lengths):
-            self.sub_discriminators.append(
-                SpectralDiscriminator(
-                    n_fft=n_fft, hop_length=hop_length, win_length=win_length
-                )
-            )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of Multiple Spectral STFT Discriminator.
+        """Process waveform through multi-scale discriminators.
 
         Args:
-            x (Tensor): Input waveform, shape (B, 1, T)
+            x (Tensor): Input waveform of shape (B, 1, T).
 
         Returns:
-            List[torch.Tensor]: List of final logits from each sub-discriminator
+            Tensor: Concatenated logits from all scales, shape (B, N).
         """
-
-        logits = [sub_disc(x) for sub_disc in self.sub_discriminators]
-        logits = torch.cat(logits, dim=-1).flatten(start_dim=1)
-
-        return logits
+        logits = [disc(x) for disc in self.discriminators]
+        return torch.cat(logits, dim=1)
 
 
 class _SpectroStreamBlock(nn.Module):
-    """A single block of the SpectroStream discriminator."""
+    """Pre-activation residual block with strided downsampling.
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        stride: Stride for spatial downsampling (time, freq).
+    """
 
     def __init__(
         self, in_channels: int, out_channels: int, stride: tuple[int, int]
     ) -> None:
         super().__init__()
 
-        # Single convolution for discriminator efficiency
         kernel_size = (max(3, 2 * stride[0] + 1), max(3, 2 * stride[1] + 1))
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
 
-        self.conv = weight_norm(
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-            )
+        self.main = nn.Sequential(
+            nn.GroupNorm(num_groups=1, num_channels=in_channels),
+            nn.LeakyReLU(negative_slope=LRELU_SLOPE),
+            nn.Conv2d(in_channels, in_channels, (3, 3), padding=(1, 1)),
+            nn.GroupNorm(num_groups=1, num_channels=in_channels),
+            nn.LeakyReLU(negative_slope=LRELU_SLOPE),
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
         )
 
+        layers = []
+        if stride != (1, 1):
+            layers.append(nn.AvgPool2d(kernel_size=stride, stride=stride))
+        if in_channels != out_channels:
+            layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1)))
+        self.skip = nn.Sequential(*layers) if layers else nn.Identity()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the block.
+        """Apply residual block with skip connection.
 
         Args:
-            x (Tensor): Input tensor of shape (B, C, H, W)
+            x: Input tensor of shape (B, C, H, W).
 
         Returns:
-            torch.Tensor: Output tensor after convolution and activation
+            Output tensor of shape (B, C', H', W').
         """
-
-        x = self.conv(x)
-        x = F.leaky_relu(x, negative_slope=LRELU_SLOPE)
-
-        return x
+        return self.skip(x) + self.main(x)
 
 
 class SpectroStreamDiscriminator(nn.Module):
-    """Single-scale SpectroStream discriminator operating on time-frequency spectrograms."""
+    """Single-scale STFT-based discriminator for mono audio.
+
+    Processes waveform through STFT to create 3-channel spectrogram input
+    (real, imaginary, magnitude), then applies residual encoder blocks.
+
+    Args:
+        n_fft: FFT size for STFT.
+        hop_length: Hop length for STFT.
+        win_length: Window length for STFT.
+    """
+
+    BASE_CHANNELS = 32
 
     def __init__(self, n_fft: int, hop_length: int, win_length: int) -> None:
         super().__init__()
+        ch = self.BASE_CHANNELS
 
-        # STFT transform
         self.stft = T.Spectrogram(
-            n_fft=n_fft,
-            win_length=win_length,
-            hop_length=hop_length,
-            power=None,  # Keep complex values
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=None
         )
 
-        # Base channel count
-        base_channels = 32
-
-        # Initial convolution for 2-channel input (real, imag)
-        self.init_conv = weight_norm(
-            nn.Conv2d(2, base_channels, kernel_size=(7, 7), padding=(3, 3))
+        self.convs = nn.ModuleList(
+            [
+                weight_norm(nn.Conv2d(3, ch, kernel_size=7, padding=3)),
+                weight_norm(nn.Conv2d(1 * ch, 2 * ch, (3, 5), (1, 2), (1, 2))),
+                weight_norm(nn.Conv2d(2 * ch, 4 * ch, (5, 5), (2, 2), (2, 2))),
+                weight_norm(nn.Conv2d(4 * ch, 8 * ch, (3, 5), (1, 2), (1, 2))),
+                weight_norm(nn.Conv2d(8 * ch, 16 * ch, (5, 5), (2, 2), (2, 2))),
+            ]
         )
 
-        # Encoder blocks with pre-computed LayerNorm shapes
-        channels = [
-            base_channels,
-            2 * base_channels,
-            4 * base_channels,
-            8 * base_channels,
-            16 * base_channels,
-        ]
-        strides = [(1, 2), (2, 2), (1, 2), (2, 2)]
+        freq_bins = n_fft // 2  # After omitting Nyquist
+        final_freq = max(1, freq_bins // 16)
 
-        self.encoder_blocks = nn.ModuleList()
-        for i, stride in enumerate(strides):
-            block = _SpectroStreamBlock(channels[i], channels[i + 1], stride=stride)
-            self.encoder_blocks.append(block)
-
-        # Final frequency-wise pooling
-        freq_bins = n_fft // 2
-        pool_size = max(1, freq_bins // 16)
-
-        self.final_conv = weight_norm(
-            nn.Conv2d(
-                channels[-1], 1, kernel_size=(1, pool_size), stride=(1, pool_size)
-            )
-        )
+        self.proj = weight_norm(nn.Conv2d(16 * ch, 1, (1, final_freq), (1, final_freq)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through discriminator.
+        """Forward pass through SpectroStream discriminator.
 
         Args:
-            x (Tensor): Input waveform, shape (B, 1, T)
+            x: Input waveform of shape (B, 1, T) or (B, T).
 
         Returns:
-            torch.Tensor: Discriminator logits
+            Discriminator logits of shape (B, num_logits).
         """
+        spec = self.stft(x.squeeze(1) if x.dim() == 3 else x)
+        spec = spec[:, :-1, :-1]  # Omit Nyquist and last frame
 
-        # Convert waveform to spectrogram
-        x_single = x.squeeze(1) if x.dim() == 3 else x
-        spec = self.stft(x_single)[:, :-1, :-1]  # Remove last freq/time bin
+        rim = torch.view_as_real(spec)
+        mag = torch.abs(spec).unsqueeze(-1)
 
-        # Create 2-channel input: real, imaginary
-        x = torch.view_as_real(spec)  # (B, freq, time, 2)
-        x = x.permute(0, 3, 2, 1)  # (B, 2, time, freq)
+        x = torch.cat([rim, mag], dim=-1)
+        x = x.permute(0, 3, 2, 1)  # (B, 3, T, F)
 
-        # Initial convolution
-        x = x.contiguous()
-        x = self.init_conv(x)
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), LRELU_SLOPE)
 
-        # Apply encoder blocks sequentially
-        for block in self.encoder_blocks:
-            x = block(x)
-
-        # Apply final frequency pooling
-        x = self.final_conv(x)
-        logits = x.flatten(start_dim=1)
-
-        return logits
+        return self.proj(x).flatten(1)
 
 
 class MultiSpectroStreamDiscriminator(nn.Module):
-    """Multi-scale SpectroStream discriminator with configurable STFT parameters.
+    """Multi-scale STFT-based discriminator.
+
+    Combines multiple SpectroStreamDiscriminators at different STFT resolutions
+    to capture features across various time-frequency trade-offs.
 
     Args:
-        n_ffts (List[int] | None): FFT sizes for each sub-discriminator
-        hop_lengths (List[int] | None): Hop lengths for each sub-discriminator
-        win_lengths (List[int] | None): Window lengths for each sub-discriminator
+        n_ffts: FFT sizes for each scale.
+        hop_lengths: Hop lengths for each scale. Defaults to n_fft // 2 (2x overlap).
+        win_lengths: Window lengths for each scale. Defaults to n_fft.
     """
 
     def __init__(
         self,
-        n_ffts: List[int] | None = None,
+        n_ffts: List[int],
         hop_lengths: List[int] | None = None,
         win_lengths: List[int] | None = None,
-    ):
+    ) -> None:
         super().__init__()
 
-        assert len(n_ffts) == len(hop_lengths) == len(win_lengths), (
-            "All parameter lists must have the same length"
+        if hop_lengths is None:
+            hop_lengths = [n // 2 for n in n_ffts]
+        if win_lengths is None:
+            win_lengths = list(n_ffts)
+
+        self.discriminators = nn.ModuleList(
+            [
+                SpectroStreamDiscriminator(fft, hop, win)
+                for fft, hop, win in zip(n_ffts, hop_lengths, win_lengths)
+            ]
         )
 
-        self.sub_discriminators = nn.ModuleList()
-        for n_fft, hop_length, win_length in zip(n_ffts, hop_lengths, win_lengths):
-            self.sub_discriminators.append(
-                SpectroStreamDiscriminator(
-                    n_fft=n_fft, hop_length=hop_length, win_length=win_length
-                )
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through multi-scale discriminator.
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Process waveform through all scales.
 
         Args:
-            x (Tensor): Input waveform, shape (B, C, T)
+            x: Input waveform of shape (B, 1, T) or (B, T).
 
         Returns:
-            torch.Tensor: Concatenated logits from all discriminator scales
+            List of logits from each scale.
         """
-        logits = [sub_disc(x) for sub_disc in self.sub_discriminators]
-        logits = torch.cat(logits, dim=-1).flatten(start_dim=1)
-        return logits
+        return [disc(x) for disc in self.discriminators]
+
+
+class PQMF(nn.Module):
+    """Pseudo Quadrature Mirror Filter bank for subband analysis.
+
+    Args:
+        period: Number of subbands / downsampling period.
+        taps: Number of filter taps (must be even).
+        cutoff: Cutoff frequency ratio for prototype filter.
+        beta: Kaiser window shape parameter.
+    """
+
+    def __init__(
+        self, period: int = 4, taps: int = 62, cutoff: float = 0.142, beta: float = 9.0
+    ) -> None:
+        super().__init__()
+
+        self.period = period
+        self.taps = taps
+
+        filters = self.build_filters(period, taps, cutoff, beta)
+        self.register_buffer("filters", filters)
+
+    @staticmethod
+    def build_filters(
+        period: int, taps: int, cutoff: float, beta: float
+    ) -> torch.Tensor:
+        """Build cosine-modulated filter bank from Kaiser-windowed sinc prototype.
+
+        Args:
+            period: Number of subbands / downsampling period.
+            taps: Number of filter taps.
+            cutoff: Cutoff frequency ratio.
+            beta: Kaiser window shape parameter.
+
+        Returns:
+            Filter bank tensor of shape (period, 1, taps + 1).
+        """
+        t = torch.arange(taps + 1, dtype=torch.float32) - taps / 2
+        proto = torch.sinc(cutoff * t) * cutoff
+        proto = proto * torch.windows.kaiser(taps + 1, beta=beta, sym=True)
+
+        k = torch.arange(period, dtype=torch.float32)
+        phase = torch.outer(2 * k + 1, t) * (torch.pi / (2 * period))
+        phase = phase + ((-1.0) ** k * torch.pi / 4).unsqueeze(1)
+
+        return (2 * period**0.5 * proto * torch.cos(phase)).unsqueeze(1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Decompose waveform into subbands.
+
+        Args:
+            x: Input waveform of shape (B, 1, T) or (B, T).
+
+        Returns:
+            Subband signals of shape (B, period, T // period).
+        """
+        x = x.unsqueeze(1) if x.dim() == 2 else x
+        x = F.conv1d(x, self.filters, stride=self.period, padding=self.taps // 2)
+        return x
+
+
+class DiscriminatorP(nn.Module):
+    """Period discriminator with PQMF subband decomposition.
+
+    Uses PQMF to decompose waveform into subbands, then applies 2D convolutions
+    along the time dimension. Based on BigVGAN's DiscriminatorP architecture.
+
+    Args:
+        period: Number of subbands for PQMF decomposition.
+        taps: PQMF filter taps.
+        cutoff: PQMF cutoff frequency ratio.
+        beta: PQMF Kaiser window beta parameter.
+    """
+
+    def __init__(
+        self, period: int = 4, taps: int = 256, cutoff: float = 0.142, beta: float = 8.0
+    ) -> None:
+        super().__init__()
+
+        self.pqmf = nn.Identity() if period == 1 else PQMF(period, taps, cutoff, beta)
+
+        self.convs = nn.ModuleList(
+            [
+                weight_norm(nn.Conv2d(1, 32, (5, 1), (3, 1), (2, 0))),
+                weight_norm(nn.Conv2d(32, 128, (5, 1), (3, 1), (2, 0))),
+                weight_norm(nn.Conv2d(128, 512, (5, 1), (3, 1), (2, 0))),
+                weight_norm(nn.Conv2d(512, 1024, (5, 1), (3, 1), (2, 0))),
+                weight_norm(nn.Conv2d(1024, 1024, (5, 1), (1, 1), (2, 0))),
+            ]
+        )
+
+        self.proj = weight_norm(nn.Conv2d(1024, 1, (3, 1), (1, 1), (1, 0)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through period discriminator.
+
+        Args:
+            x: Input waveform of shape (B, 1, T).
+
+        Returns:
+            Logits tensor of shape (B, N).
+        """
+        x = self.pqmf(x).transpose(1, 2).unsqueeze(1)
+
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), LRELU_SLOPE)
+
+        return self.proj(x).flatten(1)
+
+
+class MultiPeriodDiscriminator(nn.Module):
+    """Multi-period discriminator combining multiple DiscriminatorP instances.
+
+    Args:
+        periods: List of periods (coprime values recommended).
+        cutoffs: PQMF cutoff frequencies for each period.
+        taps: PQMF filter taps.
+        beta: PQMF Kaiser window beta parameter.
+    """
+
+    def __init__(
+        self,
+        periods: List[int],
+        cutoffs: List[float],
+        taps: int = 256,
+        beta: float = 8.0,
+    ) -> None:
+        super().__init__()
+        self.discriminators = nn.ModuleList(
+            [
+                DiscriminatorP(period=p, taps=taps, cutoff=c, beta=beta)
+                for p, c in zip(periods, cutoffs)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Forward pass through all period discriminators.
+
+        Args:
+            x: Input waveform of shape (B, 1, T).
+
+        Returns:
+            List of logits from each discriminator.
+        """
+        return [disc(x) for disc in self.discriminators]
+
+
+class DiscriminatorR(nn.Module):
+    """Resolution discriminator operating on magnitude spectrogram.
+
+    Args:
+        n_fft: FFT size for STFT.
+        win_length: Window length for STFT.
+        hop_length: Hop length for STFT.
+    """
+
+    def __init__(
+        self, n_fft: int = 1024, win_length: int = 1024, hop_length: int = 256
+    ) -> None:
+        super().__init__()
+
+        self.spec = T.Spectrogram(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=1
+        )
+
+        self.convs = nn.ModuleList(
+            [
+                weight_norm(nn.Conv2d(1, 16, (3, 9), (1, 1), (1, 4))),
+                weight_norm(nn.Conv2d(16, 32, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(32, 64, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(64, 128, (3, 9), (1, 2), (1, 4))),
+                weight_norm(nn.Conv2d(128, 256, (3, 3), (1, 1), (1, 1))),
+            ]
+        )
+
+        self.proj = weight_norm(nn.Conv2d(256, 1, (3, 3), (1, 1), (1, 1)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through resolution discriminator.
+
+        Args:
+            x: Input waveform of shape (B, 1, T).
+
+        Returns:
+            Logits tensor of shape (B, N).
+        """
+        x = self.spec(x.squeeze(1)).unsqueeze(1)
+
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), LRELU_SLOPE)
+
+        return self.proj(x).flatten(1)
+
+
+class MultiResolutionDiscriminator(nn.Module):
+    """Multi-resolution discriminator combining multiple DiscriminatorR instances.
+
+    Args:
+        n_ffts: FFT sizes for each resolution.
+        hop_lengths: Hop lengths for each resolution.
+        win_lengths: Window lengths for each resolution.
+    """
+
+    def __init__(
+        self, n_ffts: List[int], win_lengths: List[int], hop_lengths: List[int]
+    ) -> None:
+        super().__init__()
+        assert len(n_ffts) == len(win_lengths) == len(hop_lengths)
+
+        self.discriminators = nn.ModuleList(
+            [
+                DiscriminatorR(n_fft=n, win_length=w, hop_length=h)
+                for n, w, h in zip(n_ffts, win_lengths, hop_lengths)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Forward pass through all resolution discriminators.
+
+        Args:
+            x: Input waveform of shape (B, 1, T).
+
+        Returns:
+            List of logits from each discriminator.
+        """
+        return [disc(x) for disc in self.discriminators]
+
+
+class MultiScaleDiscriminators(nn.Module):
+    """Multi-scale discriminators combining MPD and MRD.
+
+    Combines MultiPeriodDiscriminator (time-domain) and MultiResolutionDiscriminator
+    (frequency-domain) for comprehensive audio quality assessment.
+
+    Args:
+        periods: Periods for MultiPeriodDiscriminator.
+        cutoffs: PQMF cutoff frequencies for each period.
+        n_ffts: FFT sizes for MultiResolutionDiscriminator.
+        win_lengths: Window lengths for MultiResolutionDiscriminator.
+        hop_lengths: Hop lengths for MultiResolutionDiscriminator.
+    """
+
+    def __init__(
+        self,
+        periods: List[int],
+        cutoffs: List[float],
+        n_ffts: List[int],
+        win_lengths: List[int],
+        hop_lengths: List[int],
+    ) -> None:
+        super().__init__()
+        self.mpd = MultiPeriodDiscriminator(periods=periods, cutoffs=cutoffs)
+        self.mrd = MultiResolutionDiscriminator(
+            n_ffts=n_ffts, win_lengths=win_lengths, hop_lengths=hop_lengths
+        )
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Process waveform through all discriminators.
+
+        Args:
+            x: Input waveform of shape (B, 1, T).
+
+        Returns:
+            List of logits from MPD and MRD sub-discriminators.
+        """
+        return self.mpd(x) + self.mrd(x)
