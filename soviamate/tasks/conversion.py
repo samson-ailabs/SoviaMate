@@ -238,20 +238,19 @@ class AudioCodecTask(L.LightningModule):
         # Train discriminator
         self.toggle_optimizer(disc_optim)
 
-        if batch_idx % 2 == 0:  # Update discriminator every 2 steps
-            fake_segments, real_segments = self._get_random_segments(
-                output_audios, target_audios, target_lengths
-            )
+        fake_segments, real_segments = self._get_random_segments(
+            output_audios, target_audios, target_lengths
+        )
 
-            fake_logits = self.discriminator(fake_segments.detach())
-            real_logits = self.discriminator(real_segments.detach())
+        fake_logits, real_logits = self.discriminator(
+            fake_segments.detach(), real_segments.detach()
+        )
 
-            disc_loss = self.adv_loss(fake_logits, real_logits)
-            self.manual_backward(disc_loss)
+        disc_loss = self.adv_loss(fake_logits, real_logits)
+        self.manual_backward(disc_loss)
 
-            disc_optim.step()
-            disc_optim.zero_grad()
-
+        disc_optim.step()
+        disc_optim.zero_grad()
         disc_sched.step()
 
         self.untoggle_optimizer(disc_optim)
@@ -265,7 +264,7 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        fake_logits = self.discriminator(fake_segments)
+        fake_logits, _ = self.discriminator(fake_segments)
         gen_loss = self.adv_loss(fake_logits)
 
         text_loss = 0.0
@@ -351,7 +350,7 @@ class AudioCodecTask(L.LightningModule):
             output_audios, target_audios, target_lengths
         )
 
-        fake_logits = self.discriminator(fake_segments)
+        fake_logits, _ = self.discriminator(fake_segments)
         gen_loss = self.adv_loss(fake_logits)
 
         text_loss = 0.0
