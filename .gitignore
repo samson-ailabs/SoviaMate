@@ -187,3 +187,6 @@ lightning_logs/
 
 # Model checkpoints (download from HuggingFace)
 checkpoints/
+
+# Testset
+samples/

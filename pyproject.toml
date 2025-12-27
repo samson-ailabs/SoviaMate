@@ -25,6 +25,9 @@ dev = [
     "ruff>=0.13.2",
     "tensorboard>=2.20.0",
 ]
+test = [
+    "torchmetrics[audio]>=1.8.2",
+]
 
 [build-system]
 requires = ["hatchling"]
