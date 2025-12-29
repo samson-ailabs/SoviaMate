@@ -333,9 +333,16 @@ class AudioCodecBundle(nn.Module):
                 codec_inputs.prompt_audios, codec_inputs.prompt_lengths
             )
 
+        # Calculate maximum output length for exact reconstruction
+        max_output_length = codec_inputs.source_lengths.max().item()
+
         # Decode with speaker conditioning
         output_audios, output_lengths = self.audio_decoder(
-            quantized_outputs, quantized_lengths, speaker_embeddings, speaker_lengths
+            quantized_outputs,
+            quantized_lengths,
+            speaker_embeddings,
+            speaker_lengths,
+            max_output_length,
         )
 
         return CodecOutputs(
