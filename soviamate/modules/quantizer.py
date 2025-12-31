@@ -48,8 +48,27 @@ class FiniteScalarQuantizer(nn.Module):
         )
         self.register_buffer("basis", _basis, persistent=False)
 
-        self.proj_to_fsq = nn.Linear(input_dim, len(fsq_levels))
-        self.proj_to_output = nn.Linear(len(fsq_levels), input_dim)
+        self.pre_quant = nn.Linear(input_dim, len(fsq_levels))
+        self.post_quant = nn.Linear(len(fsq_levels), input_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Initialize weights for variance preservation through bottleneck.
+
+        The post_quant layer expands from fsq_dim to input_dim.
+        To preserve variance: gain = sqrt((fan_in + fan_out) / (2 * fan_in))
+        For 8 → 1024: gain = sqrt((8 + 1024) / (2 * 8)) = sqrt(64.5) ≈ 8.0
+        """
+        nn.init.xavier_uniform_(self.pre_quant.weight)
+        nn.init.zeros_(self.pre_quant.bias)
+
+        fan_in = self.post_quant.in_features
+        fan_out = self.post_quant.out_features
+        gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
+
+        nn.init.xavier_uniform_(self.post_quant.weight, gain=gain)
+        nn.init.zeros_(self.post_quant.bias)
 
     def forward(
         self, features: torch.Tensor, lengths: torch.Tensor
@@ -66,13 +85,13 @@ class FiniteScalarQuantizer(nn.Module):
         """
 
         # Project directly to FSQ dimension
-        z_fsq_input = self.proj_to_fsq(features)
+        z_fsq_input = self.pre_quant(features)
 
         # FSQ quantization
         z_quantized = self._quantize_vectors(z_fsq_input)
 
         # Output Projection
-        quantized_features = self.proj_to_output(z_quantized)
+        quantized_features = self.post_quant(z_quantized)
 
         return quantized_features, lengths
 
@@ -106,7 +125,7 @@ class FiniteScalarQuantizer(nn.Module):
         """
 
         # Direct FSQ encoding
-        z_fsq_input = self.proj_to_fsq(inputs)
+        z_fsq_input = self.pre_quant(inputs)
 
         # Convert to indices
         z_quantized = self._quantize_vectors(z_fsq_input)
@@ -127,7 +146,7 @@ class FiniteScalarQuantizer(nn.Module):
 
         # Convert indices to codes
         codes = self._indices_to_codes(indices)
-        outputs = self.proj_to_output(codes)
+        outputs = self.post_quant(codes)
 
         return outputs
 

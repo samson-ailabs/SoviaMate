@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
-from soviamate.layers.processor import SpectrogramProcessor
+from soviamate.layers.processor import WaveformPatcher
 from soviamate.utils.helper import (
     make_attention_mask,
     make_padding_mask,
@@ -32,11 +32,10 @@ class AudioEncoder(nn.Module):
     """Audio Encoder with streaming inference capabilities.
 
     Uses dynamic chunk training for unified streaming and non-streaming models.
+    Uses waveform patching (inspired by TS3-Codec/Stable-Codec) instead of STFT.
 
     Args:
-        frame_stacking (int): number of frames to stack for downsampling.
-        window_length (int): window length for STFT (n_fft).
-        hop_length (int): hop length for STFT.
+        patch_size (int): number of audio samples per patch.
         num_layers (int): number of conformer layers.
         d_model (int): embedding dimension for the conformer layers.
         ffn_dim (int): hidden dimension for the feed-forward module.
@@ -52,9 +51,7 @@ class AudioEncoder(nn.Module):
 
     def __init__(
         self,
-        frame_stacking: int,
-        window_length: int,
-        hop_length: int,
+        patch_size: int,
         num_layers: int,
         d_model: int,
         ffn_dim: int,
@@ -72,7 +69,7 @@ class AudioEncoder(nn.Module):
         self.streaming_chunk_size = None
         self.streaming_left_context = None
 
-        self.frame_shift = hop_length * frame_stacking
+        self.patch_size = patch_size
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
@@ -81,10 +78,8 @@ class AudioEncoder(nn.Module):
         self.left_context_ratio = left_context_ratio
         self.full_context_prob = full_context_prob
 
-        self.extractor = SpectrogramProcessor(
-            frame_stacking=frame_stacking,
-            window_length=window_length,
-            hop_length=hop_length,
+        self.extractor = WaveformPatcher(
+            patch_size=patch_size,
             output_dim=d_model,
         )
 
@@ -184,7 +179,7 @@ class AudioEncoder(nn.Module):
         """
 
         batch_size, device = segments.size(0), segments.device
-        valid_segment_length = self.streaming_chunk_size * self.frame_shift
+        valid_segment_length = self.streaming_chunk_size * self.patch_size
 
         if self.streaming_chunk_size is None or self.streaming_left_context is None:
             raise ValueError("The streaming configuration is not set.")
@@ -204,7 +199,7 @@ class AudioEncoder(nn.Module):
             [valid_segment_length] * batch_size, device=segments.device
         )
 
-        xs, x_lens = self.specgram(segments, lengths)
+        xs, x_lens = self.extractor(segments, lengths)
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(

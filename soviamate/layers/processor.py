@@ -174,6 +174,126 @@ class InverseSpectrogramProcessor(nn.Module):
         return waveforms.unsqueeze(2), output_lengths
 
 
+class WaveformPatcher(nn.Module):
+    r"""Converts raw waveform into patch embeddings.
+
+    Args:
+        patch_size (int): Number of audio samples per patch.
+        output_dim (int): Output embedding dimension after projection.
+    """
+
+    def __init__(self, patch_size: int, output_dim: int):
+        super().__init__()
+
+        self.patch_size = patch_size
+        self.output_dim = output_dim
+
+        self.linear1 = nn.Linear(patch_size, output_dim, bias=False)
+        self.linear2 = nn.Linear(output_dim, output_dim, bias=True)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Initialize weights with Xavier uniform for variance preservation."""
+        nn.init.xavier_uniform_(self.linear1.weight)
+        nn.init.xavier_uniform_(self.linear2.weight)
+        nn.init.zeros_(self.linear2.bias)
+
+    def forward(
+        self, waveforms: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Forward pass of the waveform patcher.
+
+        Args:
+            waveforms (Tensor): Input tensor with shape `(B, T, 1)`.
+            lengths (Tensor): Audio sample lengths with shape `(B,)`.
+
+        Returns:
+            Tensor: Output features with shape `(B, T // patch_size, D)`.
+            Tensor: Feature sequence lengths with shape `(B,)`.
+        """
+        if waveforms.size(2) != 1:
+            raise ValueError("The audio signal should be mono-channel.")
+
+        x = waveforms.squeeze(2)
+        batch_size, num_samples = x.shape
+
+        remainder = num_samples % self.patch_size
+        if remainder != 0:
+            x = F.pad(x, (0, self.patch_size - remainder))
+
+        num_patches = x.size(1) // self.patch_size
+        x = x.reshape(batch_size, num_patches, self.patch_size)
+
+        x = self.linear2(self.linear1(x))
+        output_lengths = torch.ceil(lengths / self.patch_size)
+
+        return x, output_lengths.to(dtype=lengths.dtype)
+
+
+class WaveformUnpatcher(nn.Module):
+    r"""Reconstructs waveform from patch embeddings.
+
+    Args:
+        patch_size (int): Number of audio samples per patch.
+        input_dim (int): Input embedding dimension from the decoder.
+    """
+
+    def __init__(self, patch_size: int, input_dim: int):
+        super().__init__()
+
+        self.patch_size = patch_size
+        self.input_dim = input_dim
+
+        self.linear1 = nn.Linear(input_dim, input_dim, bias=True)
+        self.linear2 = nn.Linear(input_dim, patch_size, bias=False)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Initialize weights for proper output scale.
+
+        The final layer uses gain=0.05 to match target audio amplitude (~0.05 std).
+        This is derived from: output_std ≈ gain × feature_std, where features
+        have approximately unit variance after Conformer + LayerNorm.
+        """
+        nn.init.xavier_uniform_(self.linear1.weight)
+        nn.init.zeros_(self.linear1.bias)
+        nn.init.xavier_uniform_(self.linear2.weight, gain=0.05)
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        lengths: torch.Tensor,
+        max_output_length: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Forward pass of the waveform unpatcher.
+
+        Args:
+            features (Tensor): Input tensor with shape `(B, N, D)` where N is the
+                number of patches and D is the embedding dimension.
+            lengths (Tensor): Feature sequence lengths (number of valid patches)
+                with shape `(B,)`.
+            max_output_length (int, optional): Maximum output audio length for exact
+                reconstruction. If provided, output will be trimmed/padded to this length.
+
+        Returns:
+            Tensor: Output waveform tensor with shape `(B, T, 1)` where T is either
+                `max_output_length` or `N * patch_size`.
+            Tensor: Output audio lengths with shape `(B,)`.
+        """
+        x = self.linear2(self.linear1(features))
+        x = x.reshape(features.size(0), -1)
+
+        output_lengths = lengths * self.patch_size
+
+        if max_output_length is not None:
+            x = F.pad(x, (0, max_output_length - x.size(1)))
+            output_lengths = torch.clamp(output_lengths, max=max_output_length)
+
+        return x.unsqueeze(2), output_lengths
+
+
 class SpecAugmentProcessor(nn.Module):
     r"""SpecAugment-style masking for hidden representations.
 
