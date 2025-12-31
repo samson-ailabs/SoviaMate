@@ -44,7 +44,7 @@ class ExtractionStats(NamedTuple):
 class TokenizerConfig:
     """Configuration for tokenizer preparation."""
 
-    input_file: Path
+    input_files: list[Path]
     model_dir: Path
     model_name: str
     vocab_size: int = 1024
@@ -96,12 +96,12 @@ def normalize_transcript(text: str) -> str:
 
 
 def extract_transcripts(
-    jsonl_file: Path, output_file: Path, normalize: bool = True
+    jsonl_files: list[Path], output_file: Path, normalize: bool = True
 ) -> ExtractionStats:
-    """Extract and normalize transcripts from JSONL file.
+    """Extract and normalize transcripts from multiple JSONL files.
 
     Args:
-        jsonl_file: Path to input JSONL file
+        jsonl_files: List of paths to input JSONL files
         output_file: Path to output transcript file
         normalize: Whether to normalize transcripts
 
@@ -109,52 +109,55 @@ def extract_transcripts(
         ExtractionStats with processing results
 
     Raises:
-        ValueError: If input file doesn't exist
+        ValueError: If any input file doesn't exist
     """
-    if not jsonl_file.exists():
-        raise ValueError(f"Input file not found: {jsonl_file}")
+    for jsonl_file in jsonl_files:
+        if not jsonl_file.exists():
+            raise ValueError(f"Input file not found: {jsonl_file}")
 
-    logger.info("Extracting transcripts from %s", jsonl_file)
+    logger.info("Extracting transcripts from %d file(s)", len(jsonl_files))
     logger.info("Normalization: %s", "enabled" if normalize else "disabled")
 
     processed, valid, skipped, total_chars = 0, 0, 0, 0
 
-    with (
-        open(jsonl_file, "r", encoding=ENCODING) as infile,
-        open(output_file, "w", encoding=ENCODING) as outfile,
-    ):
-        for line_num, line in enumerate(infile, 1):
-            try:
-                data = json.loads(line.strip())
-                transcript = data.get("transcript", "").strip()
+    with open(output_file, "w", encoding=ENCODING) as outfile:
+        for jsonl_file in jsonl_files:
+            logger.info("Processing: %s", jsonl_file)
+            with open(jsonl_file, "r", encoding=ENCODING) as infile:
+                for line_num, line in enumerate(infile, 1):
+                    try:
+                        data = json.loads(line.strip())
+                        transcript = data.get("transcript", "").strip()
 
-                if not transcript:
-                    skipped += 1
-                    processed += 1
-                    continue
+                        if not transcript:
+                            skipped += 1
+                            processed += 1
+                            continue
 
-                text = normalize_transcript(transcript) if normalize else transcript
+                        text = normalize_transcript(transcript) if normalize else transcript
 
-                if len(text) >= MIN_TRANSCRIPT_LENGTH:
-                    outfile.write(text + "\n")
-                    valid += 1
-                    total_chars += len(text)
-                else:
-                    skipped += 1
+                        if len(text) >= MIN_TRANSCRIPT_LENGTH:
+                            outfile.write(text + "\n")
+                            valid += 1
+                            total_chars += len(text)
+                        else:
+                            skipped += 1
 
-                processed += 1
+                        processed += 1
 
-                if processed % LOG_INTERVAL == 0:
-                    logger.info(
-                        "Progress: processed=%s, valid=%s, skipped=%s",
-                        processed,
-                        valid,
-                        skipped,
-                    )
+                        if processed % LOG_INTERVAL == 0:
+                            logger.info(
+                                "Progress: processed=%s, valid=%s, skipped=%s",
+                                processed,
+                                valid,
+                                skipped,
+                            )
 
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping invalid JSON at line %s: %s", line_num, e)
-                continue
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "Skipping invalid JSON at %s:%s: %s", jsonl_file.name, line_num, e
+                        )
+                        continue
 
     stats = ExtractionStats(processed, valid, skipped, total_chars)
     logger.info(
@@ -219,7 +222,7 @@ def main() -> int:
         description="Extract transcripts and train tokenizer"
     )
     parser.add_argument(
-        "--input", "-i", type=Path, required=True, help="Input JSONL file"
+        "--input", "-i", type=Path, nargs="+", required=True, help="Input JSONL file(s)"
     )
     parser.add_argument("--model-name", required=True, help="Model name")
     parser.add_argument(
@@ -245,7 +248,7 @@ def main() -> int:
 
     try:
         config = TokenizerConfig(
-            input_file=args.input,
+            input_files=args.input,
             model_dir=args.model_dir,
             model_name=args.model_name,
             vocab_size=args.vocab_size,
@@ -261,9 +264,9 @@ def main() -> int:
             transcript_file = Path(tmp.name)
 
         try:
-            # Extract transcripts
+            # Extract transcripts from all input files
             stats = extract_transcripts(
-                config.input_file, transcript_file, config.normalize
+                config.input_files, transcript_file, config.normalize
             )
 
             if stats.valid == 0:
