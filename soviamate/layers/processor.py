@@ -14,6 +14,7 @@
 
 """Audio processing modules for extracting spectrograms and reconstructing waveforms"""
 
+import math
 import random
 from typing import Optional, Tuple, Union
 
@@ -191,14 +192,6 @@ class WaveformPatcher(nn.Module):
         self.linear1 = nn.Linear(patch_size, output_dim, bias=False)
         self.linear2 = nn.Linear(output_dim, output_dim, bias=True)
 
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """Initialize weights with Xavier uniform for variance preservation."""
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-        nn.init.zeros_(self.linear2.bias)
-
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -237,9 +230,10 @@ class WaveformUnpatcher(nn.Module):
     Args:
         patch_size (int): Number of audio samples per patch.
         input_dim (int): Input embedding dimension from the decoder.
+        init_scale (float): Initial value for learnable output scale parameter.
     """
 
-    def __init__(self, patch_size: int, input_dim: int):
+    def __init__(self, patch_size: int, input_dim: int, init_scale: float = 0.05):
         super().__init__()
 
         self.patch_size = patch_size
@@ -248,18 +242,8 @@ class WaveformUnpatcher(nn.Module):
         self.linear1 = nn.Linear(input_dim, input_dim, bias=True)
         self.linear2 = nn.Linear(input_dim, patch_size, bias=False)
 
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """Initialize weights for proper output scale.
-
-        The final layer uses gain=0.05 to match target audio amplitude (~0.05 std).
-        This is derived from: output_std ≈ gain × feature_std, where features
-        have approximately unit variance after Conformer + LayerNorm.
-        """
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.zeros_(self.linear1.bias)
-        nn.init.xavier_uniform_(self.linear2.weight, gain=0.05)
+        raw_init = math.log(math.exp(max(init_scale, 1e-6)) - 1)
+        self.raw_output_scale = nn.Parameter(torch.tensor(raw_init))
 
     def forward(
         self,
@@ -283,8 +267,9 @@ class WaveformUnpatcher(nn.Module):
             Tensor: Output audio lengths with shape `(B,)`.
         """
         x = self.linear2(self.linear1(features))
-        x = x.reshape(features.size(0), -1)
+        x = x * F.softplus(self.raw_output_scale)
 
+        x = x.reshape(features.size(0), -1)
         output_lengths = lengths * self.patch_size
 
         if max_output_length is not None:

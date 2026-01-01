@@ -54,20 +54,34 @@ class FiniteScalarQuantizer(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        """Initialize weights for variance preservation through bottleneck.
+        """Initialize weights for proper variance propagation.
 
-        The post_quant layer expands from fsq_dim to input_dim.
-        To preserve variance: gain = sqrt((fan_in + fan_out) / (2 * fan_in))
-        For 8 → 1024: gain = sqrt((8 + 1024) / (2 * 8)) = sqrt(64.5) ≈ 8.0
+        pre_quant (d_model → fsq_dim): Uses gain to preserve unit variance.
+        With Xavier on asymmetric layers (fan_in >> fan_out), variance amplifies:
+            Var(output) = fan_in × 2/(fan_in + fan_out) × Var(input)
+
+        For fan_in=1024, fan_out=8: Var(output) = 1.98 × Var(input), std = 1.41
+        This causes tanh saturation and poor codebook utilization.
+
+        To preserve unit variance:
+            gain = √((fan_in + fan_out) / (2 × fan_in))
+            For 1024 → 8: gain = √(1032/2048) = 0.71
+
+        post_quant (fsq_dim → d_model): Standard gain for dimension expansion.
+        Decoder has LayerNorm which normalizes input, so exact variance less critical.
         """
-        nn.init.xavier_uniform_(self.pre_quant.weight)
+        fan_in = self.pre_quant.in_features
+        fan_out = self.pre_quant.out_features
+        pre_gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
+
+        nn.init.xavier_uniform_(self.pre_quant.weight, gain=pre_gain)
         nn.init.zeros_(self.pre_quant.bias)
 
         fan_in = self.post_quant.in_features
         fan_out = self.post_quant.out_features
-        gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
+        post_gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
 
-        nn.init.xavier_uniform_(self.post_quant.weight, gain=gain)
+        nn.init.xavier_uniform_(self.post_quant.weight, gain=post_gain)
         nn.init.zeros_(self.post_quant.bias)
 
     def forward(
