@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from soviamate.layers.conformer import ConformerLayer
-from soviamate.layers.processor import WaveformPatcher
+from soviamate.layers.processor import SpectrogramProcessor
 from soviamate.utils.helper import (
     make_attention_mask,
     make_padding_mask,
@@ -32,10 +32,12 @@ class AudioEncoder(nn.Module):
     """Audio Encoder with streaming inference capabilities.
 
     Uses dynamic chunk training for unified streaming and non-streaming models.
-    Uses waveform patching (inspired by TS3-Codec/Stable-Codec) instead of STFT.
+    Uses STFT-based spectrogram extraction with frame stacking.
 
     Args:
-        patch_size (int): number of audio samples per patch.
+        frame_stacking (int): number of spectrogram frames to stack.
+        window_length (int): window length for STFT (n_fft).
+        hop_length (int): hop length for STFT.
         num_layers (int): number of conformer layers.
         d_model (int): embedding dimension for the conformer layers.
         ffn_dim (int): hidden dimension for the feed-forward module.
@@ -51,7 +53,9 @@ class AudioEncoder(nn.Module):
 
     def __init__(
         self,
-        patch_size: int,
+        frame_stacking: int,
+        window_length: int,
+        hop_length: int,
         num_layers: int,
         d_model: int,
         ffn_dim: int,
@@ -69,7 +73,9 @@ class AudioEncoder(nn.Module):
         self.streaming_chunk_size = None
         self.streaming_left_context = None
 
-        self.patch_size = patch_size
+        self.frame_stacking = frame_stacking
+        self.window_length = window_length
+        self.hop_length = hop_length
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
@@ -78,8 +84,10 @@ class AudioEncoder(nn.Module):
         self.left_context_ratio = left_context_ratio
         self.full_context_prob = full_context_prob
 
-        self.extractor = WaveformPatcher(
-            patch_size=patch_size,
+        self.extractor = SpectrogramProcessor(
+            frame_stacking=frame_stacking,
+            window_length=window_length,
+            hop_length=hop_length,
             output_dim=d_model,
         )
 
@@ -179,13 +187,17 @@ class AudioEncoder(nn.Module):
         """
 
         batch_size, device = segments.size(0), segments.device
-        valid_segment_length = self.streaming_chunk_size * self.patch_size
+        valid_segment_length = (
+            self.streaming_chunk_size * self.hop_length * self.frame_stacking
+        )
 
         if self.streaming_chunk_size is None or self.streaming_left_context is None:
             raise ValueError("The streaming configuration is not set.")
 
         if segments.size(1) != valid_segment_length:
-            raise ValueError("The segment size does not match the chunk size.")
+            raise ValueError(
+                f"Segment size {segments.size(1)} does not match expected {valid_segment_length}."
+            )
 
         if segments.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
