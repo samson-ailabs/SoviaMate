@@ -16,20 +16,20 @@ task:
         - /data/Libri-Heavy/trainset.jsonl
       tokenizer: *tokenizer
 
-      transforms:
-        content:
-          perturb:
-            _target_: soviamate.datas.transform.SpeakerPerturbation
-            min_formant_factor: 0.8
-            max_formant_factor: 1.2
-            probability: 1.0
+      # transforms:
+      #   content:
+      #     perturb:
+      #       _target_: soviamate.datas.transform.SpeakerPerturbation
+      #       min_formant_factor: 0.8
+      #       max_formant_factor: 1.2
+      #       probability: 1.0
 
-        speaker:
-          trimmer:
-            _target_: soviamate.datas.transform.AudioTrimmer
-            percentage: 0.3
-            min_duration: 0.7
-            probability: 1.0
+      #   speaker:
+      #     trimmer:
+      #       _target_: soviamate.datas.transform.AudioTrimmer
+      #       percentage: 0.3
+      #       min_duration: 0.7
+      #       probability: 1.0
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
@@ -67,25 +67,23 @@ task:
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
 
-    spec_augment:
-      _target_: soviamate.layers.processor.SpecAugmentProcessor
-      time_mask_param: 0.05
-      freq_mask_param: 0.0
-      num_time_masks: 5
-      num_freq_masks: 0
-      mask_value: 0.0
+    # splice_out:
+    #   _target_: soviamate.layers.processor.SpliceOutProcessor
+    #   num_splices: 4
+    #   max_splice_length: 5
+    #   probability: 0.5
 
-    text_decoder:
-      _target_: soviamate.modules.decoder.TextDecoder
-      output_dim: *vocab_size
-      num_layers: 2
-      d_model: *d_model
-      ffn_dim: 4096
-      num_heads: 8
-      kernel_size: 9
-      dropout: 0.1
-      dynamic_chunk_sizes: *dynamic_chunk_sizes
-      full_context_prob: *full_context_prob
+    # text_decoder:
+    #   _target_: soviamate.modules.decoder.TextDecoder
+    #   output_dim: *vocab_size
+    #   num_layers: 2
+    #   d_model: *d_model
+    #   ffn_dim: 4096
+    #   num_heads: 8
+    #   kernel_size: 9
+    #   dropout: 0.1
+    #   dynamic_chunk_sizes: *dynamic_chunk_sizes
+    #   full_context_prob: *full_context_prob
 
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
@@ -107,12 +105,12 @@ task:
       fsq_levels: [16, 16, 16, 16, 16, 16, 16, 16]
       noise_dropout: 0.5
 
-    speaker_adapter:
-      _target_: soviamate.modules.adapter.SpeakerAdapter
-      model_name: WAVLM_LARGE
-      extract_layer: 4
-      output_dim: *speaker_dim
-      dropout: 0.1
+    # speaker_adapter:
+    #   _target_: soviamate.modules.adapter.SpeakerAdapter
+    #   model_name: WAVLM_LARGE
+    #   extract_layer: 4
+    #   output_dim: *speaker_dim
+    #   dropout: 0.1
 
     discriminator:
       _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminators
@@ -128,19 +126,19 @@ task:
     adv_loss:
       _target_: soviamate.modules.criterion.HingeAdversarialLoss
 
-    text_loss:
-      _target_: soviamate.modules.criterion.SequenceToSequenceLoss
-      zero_infinity: true
+    # text_loss:
+    #   _target_: soviamate.modules.criterion.SequenceToSequenceLoss
+    #   zero_infinity: true
 
-    speaker_loss:
-      _target_: soviamate.modules.criterion.SequenceContrastiveLoss
-      num_samples: 1024
-      lambda_inv: 5.0
-      lambda_var: 1.0
-      lambda_cov: 1.0
+    # speaker_loss:
+    #   _target_: soviamate.modules.criterion.SequenceContrastiveLoss
+    #   num_samples: 1024
+    #   lambda_inv: 5.0
+    #   lambda_var: 1.0
+    #   lambda_cov: 1.0
 
   optim:
-    total_steps: &total_steps 800000 
+    total_steps: &total_steps 800000
     pct_start: &pct_start 0.01
 
     generator:
