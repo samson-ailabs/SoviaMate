@@ -63,10 +63,10 @@ class MelSpectralEnergyDistanceLoss(nn.Module):
     Args:
         sample_rate: Audio sample rate in Hz.
         window_sizes: List of STFT window sizes.
-        n_mels: Number of mel bins. Default: 64.
+        mel_bins: List of mel bins corresponding to each window size.
     """
 
-    def __init__(self, sample_rate: int, window_sizes: List[int], n_mels: int = 64):
+    def __init__(self, sample_rate: int, window_sizes: List[int], mel_bins: List[int]):
         super().__init__()
 
         self.register_buffer(
@@ -74,11 +74,11 @@ class MelSpectralEnergyDistanceLoss(nn.Module):
         )
 
         self.mel_spectrograms = nn.ModuleList()
-        for window_size in window_sizes:
+        for window_size, n_mels in zip(window_sizes, mel_bins):
             self.mel_spectrograms.append(
                 T.MelSpectrogram(
                     sample_rate=sample_rate,
-                    n_fft=max(512, window_size),
+                    n_fft=window_size,
                     win_length=window_size,
                     hop_length=window_size // 4,
                     n_mels=n_mels,

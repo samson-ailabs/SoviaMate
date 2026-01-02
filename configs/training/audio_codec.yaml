@@ -4,14 +4,16 @@ task:
   data:
     tokenizer: &tokenizer
       _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
-      model_path: tokenizers/emilia_english_tokenizer.model
+      model_path: tokenizers/emilia_libri_tokenizer.model
       vocab_size: &vocab_size 1025  # 1024 BPE tokens + 1 blank token (index 0)
       character_coverage: 0.9995
       model_type: bpe
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Emilia-Dataset/trainset-english.jsonl
+      filepaths:
+        - /data/Emilia-Dataset/trainset-english.jsonl
+        - /data/Libri-Heavy/trainset.jsonl
       tokenizer: *tokenizer
 
       transforms:
@@ -31,7 +33,9 @@ task:
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Emilia-Dataset/valset-english.jsonl
+      filepaths:
+        - /data/Emilia-Dataset/valset-english.jsonl
+        - /data/Libri-Heavy/valset.jsonl
       tokenizer: *tokenizer
 
     loader:
@@ -94,8 +98,6 @@ task:
       num_heads: 8
       kernel_size: 9
       dropout: 0.1
-      use_cross_attn: true
-      cross_attn_dim: &speaker_dim 256
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
 
@@ -113,7 +115,7 @@ task:
       dropout: 0.1
 
     discriminator:
-      _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminator
+      _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminators
       n_ffts: [128, 256, 512, 1024, 2048, 4096]
       hop_lengths: [64, 128, 256, 512, 1024, 2048]
 
@@ -121,6 +123,7 @@ task:
       _target_: soviamate.modules.criterion.MelSpectralEnergyDistanceLoss
       sample_rate: 16000
       window_sizes: [64, 128, 256, 512, 1024, 2048]
+      mel_bins: [10, 20, 40, 80, 160, 320]
 
     adv_loss:
       _target_: soviamate.modules.criterion.HingeAdversarialLoss
@@ -137,14 +140,14 @@ task:
       lambda_cov: 1.0
 
   optim:
-    total_steps: &total_steps 1000000  # (32M samples / (16 batch size * 8 gpus) * 4 epochs)
-    pct_start: &pct_start 0.01  # 0.01 * 1,000,000 = 10,000 steps for warmup
+    total_steps: &total_steps 800000 
+    pct_start: &pct_start 0.01
 
     generator:
       optimizer:
         _target_: torch.optim.AdamW
         lr: 1.0
-        betas: [0.9, 0.95]
+        betas: [0.8, 0.99]
         fused: true
 
       scheduler:
@@ -159,7 +162,7 @@ task:
       optimizer:
         _target_: torch.optim.AdamW
         lr: 1.0
-        betas: [0.9, 0.95]
+        betas: [0.8, 0.99]
         fused: true
 
       scheduler:
@@ -180,13 +183,13 @@ callbacks:
     monitor: val_loss
     save_top_k: 10
     save_last: true
-    every_n_train_steps: 75000
+    every_n_train_steps: 100000
 
 loggers:
   tb:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     save_dir: lightning_logs
-    name: emilia_english_codec
+    name: emilia_libri_codec
     version: null
     default_hp_metric: false
 
@@ -195,5 +198,5 @@ trainer:
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 4
+  max_epochs: 2
   val_check_interval: 50000
