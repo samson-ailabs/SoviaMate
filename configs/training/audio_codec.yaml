@@ -46,9 +46,9 @@ task:
   model:
     d_model: &d_model 1024
 
-    frame_stacking: &frame_stacking 4
-    window_length: &window_length 400
-    hop_length: &hop_length 160
+    frame_stacking: &frame_stacking 2
+    window_length: &window_length 800
+    hop_length: &hop_length 320
 
     dynamic_chunk_sizes: &dynamic_chunk_sizes [4, 8, 12, 16]
     full_context_prob: &full_context_prob 0.2

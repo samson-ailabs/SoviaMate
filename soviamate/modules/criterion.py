@@ -136,6 +136,111 @@ class MelSpectralEnergyDistanceLoss(nn.Module):
         return l1_loss + l2_loss
 
 
+class AntiWrappingPhaseLoss(nn.Module):
+    """Multi-resolution phase loss with anti-wrapping for periodic phase values.
+
+    Phase wraps at ±π, so direct L1/MSE fails (e.g., -π and π are identical but
+    have maximum distance). Anti-wrapping maps differences to [0, π] correctly.
+
+    Args:
+        n_ffts: FFT sizes for multi-resolution. Default: [512, 1024, 2048].
+    """
+
+    def __init__(self, n_ffts: List[int] | None = None):
+        super().__init__()
+        self.n_ffts = n_ffts or [512, 1024, 2048]
+
+        for n_fft in self.n_ffts:
+            self.register_buffer(f"window_{n_fft}", torch.hann_window(n_fft))
+
+    def anti_wrap(self, x: torch.Tensor) -> torch.Tensor:
+        """Map phase differences to [0, π] handling periodic wraparound."""
+        return torch.abs(x - 2 * math.pi * torch.round(x / (2 * math.pi)))
+
+    def compute_stft_phase(self, waveform: torch.Tensor, n_fft: int) -> torch.Tensor:
+        """Extract STFT phase from waveform.
+
+        Args:
+            waveform: Input waveform of shape (B, T).
+            n_fft: FFT size.
+
+        Returns:
+            Phase tensor of shape (B, F, T_frames).
+        """
+        window = getattr(self, f"window_{n_fft}")
+        stft = torch.stft(
+            waveform,
+            n_fft=n_fft,
+            hop_length=n_fft // 4,
+            win_length=n_fft,
+            window=window,
+            return_complex=True,
+        )
+        return torch.angle(stft)
+
+    def forward(
+        self, outputs: torch.Tensor, targets: torch.Tensor, lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute multi-resolution phase loss with masking.
+
+        Args:
+            outputs: Predicted waveforms of shape (B, T) or (B, 1, T).
+            targets: Target waveforms of shape (B, T) or (B, 1, T).
+            lengths: Valid waveform lengths per sample of shape (B,).
+
+        Returns:
+            Sum of IP, GD, and IAF losses averaged across resolutions.
+        """
+        if outputs.dim() == 3:
+            outputs = outputs.squeeze(1)
+        if targets.dim() == 3:
+            targets = targets.squeeze(1)
+
+        # Create mask from waveform lengths: (B, 1, T)
+        masks = make_padding_mask(lengths)
+        masks = (~masks[:, None, :]).float()
+
+        total_loss = 0.0
+
+        for n_fft in self.n_ffts:
+            pred_phase = self.compute_stft_phase(outputs, n_fft)
+            target_phase = self.compute_stft_phase(targets, n_fft)
+
+            # Resize mask to match phase dimensions: (B, 1, T)
+            mask = F.interpolate(masks, size=pred_phase.size(2))
+            mask = mask.expand_as(pred_phase)
+
+            # Instantaneous Phase (IP): direct phase alignment
+            phase_diff = pred_phase - target_phase
+            ip_error = self.anti_wrap(phase_diff)
+            ip_loss = (ip_error * mask).sum() / mask.sum()
+
+            # Group Delay (GD): frequency derivative consistency
+            pred_gd = torch.diff(pred_phase, dim=1)
+            target_gd = torch.diff(target_phase, dim=1)
+
+            gd_diff = pred_gd - target_gd
+            gd_error = self.anti_wrap(gd_diff)
+
+            gd_mask = mask[:, :-1, :]
+            gd_loss = (gd_error * gd_mask).sum() / gd_mask.sum()
+
+            # Instantaneous Angular Frequency (IAF): time derivative consistency
+            pred_iaf = torch.diff(pred_phase, dim=2)
+            target_iaf = torch.diff(target_phase, dim=2)
+
+            iaf_diff = pred_iaf - target_iaf
+            iaf_error = self.anti_wrap(iaf_diff)
+
+            iaf_mask = mask[:, :, :-1]
+            iaf_loss = (iaf_error * iaf_mask).sum() / iaf_mask.sum()
+
+            # Accumulate losses across resolutions
+            total_loss += ip_loss + gd_loss + iaf_loss
+
+        return total_loss / len(self.n_ffts)
+
+
 class SequenceToSequenceLoss(nn.Module):
     r"""Loss function for sequence-to-sequence models.
 

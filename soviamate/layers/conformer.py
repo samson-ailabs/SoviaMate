@@ -32,7 +32,7 @@ class SelfAttentionModule(nn.Module):
         super().__init__()
         self.num_heads = num_heads
 
-        self.layer_norm = nn.LayerNorm(input_dim, eps=1e-2)
+        self.layer_norm = nn.LayerNorm(input_dim)
         self.attention = nn.MultiheadAttention(
             input_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -96,7 +96,7 @@ class CrossAttentionModule(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.layer_norm = nn.LayerNorm(input_dim, eps=1e-2)
+        self.layer_norm = nn.LayerNorm(input_dim)
         self.attention = nn.MultiheadAttention(
             embed_dim=input_dim,
             num_heads=num_heads,
@@ -160,7 +160,7 @@ class ConvolutionModule(nn.Module):
 
         self.left_context = kernel_size - 1
 
-        self.layer_norm = nn.LayerNorm(input_dim, eps=1e-2)
+        self.layer_norm = nn.LayerNorm(input_dim)
         self.pointwise_conv1 = nn.Conv1d(input_dim, input_dim, 1)
         self.activation1 = nn.GELU()
         self.depthwise_conv = nn.Conv1d(
@@ -229,7 +229,7 @@ class FeedForwardModule(nn.Module):
         super().__init__()
 
         self.sequential = nn.Sequential(
-            nn.LayerNorm(input_dim, eps=1e-2),
+            nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -278,7 +278,7 @@ class ConformerLayer(nn.Module):
         self.attn_module = SelfAttentionModule(input_dim, num_heads, dropout)
         self.conv_module = ConvolutionModule(input_dim, kernel_size, dropout)
         self.ffn2_module = FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.layer_norm = nn.LayerNorm(input_dim, eps=1e-2)
+        self.layer_norm = nn.LayerNorm(input_dim)
 
         if use_cross_attn:
             self.cross_attn_module = CrossAttentionModule(

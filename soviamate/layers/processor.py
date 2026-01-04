@@ -25,7 +25,11 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 class SpectrogramProcessor(nn.Module):
-    r"""Spectrogram extraction processor with frame stacking.
+    """STFT-based spectrogram processor with 3-stream input.
+
+    Extracts magnitude, phase, and phase gradient features from audio waveforms.
+    The phase gradient provides temporal continuity information that helps
+    maintain phase coherence during reconstruction.
 
     Args:
         frame_stacking (int): Number of frames to stack for downsampling.
@@ -38,12 +42,13 @@ class SpectrogramProcessor(nn.Module):
         self, frame_stacking: int, window_length: int, hop_length: int, output_dim: int
     ):
         super().__init__()
+
         self.frame_stacking = frame_stacking
         self.window_length = window_length
         self.hop_length = hop_length
 
         n_bins = window_length // 2 + 1
-        stacked_dim = 2 * n_bins * frame_stacking
+        stacked_dim = 3 * n_bins * frame_stacking
 
         self.specgram = TAudio.Spectrogram(
             n_fft=window_length,
@@ -51,31 +56,63 @@ class SpectrogramProcessor(nn.Module):
             hop_length=hop_length,
             power=None,
         )
+
         self.projector = nn.Linear(stacked_dim, output_dim)
+        nn.init.xavier_uniform_(self.projector.weight)
+        nn.init.zeros_(self.projector.bias)
+
+    def compute_phase_gradient(self, phase: torch.Tensor) -> torch.Tensor:
+        """Compute temporal gradient of unwrapped phase.
+
+        ∇ϕ[m,k] = ϕ'[m,k] - ϕ'[m-1,k] for m > 0, else 0
+
+        The gradient captures frame-to-frame phase changes, computed by taking
+        the phase difference and correcting for 2π discontinuities.
+
+        Args:
+            phase: Wrapped phase tensor of shape (B, T, F).
+
+        Returns:
+            Phase gradient tensor of shape (B, T, F).
+        """
+        # Compute phase difference between adjacent frames
+        phase_diff = torch.diff(phase, dim=1)
+
+        # Unwrap: correct jumps larger than π (this gives the gradient directly)
+        phase_gradient = phase_diff - 2 * torch.pi * torch.round(
+            phase_diff / (2 * torch.pi)
+        )
+
+        # Pad first frame with zeros (gradient undefined at m=0)
+        phase_gradient = F.pad(phase_gradient, (0, 0, 1, 0), value=0.0)
+
+        return phase_gradient
 
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the spectrogram processor.
+        """Forward pass of the spectrogram processor.
 
         Args:
-            waveforms (Tensor): Input tensor with shape `(B, T, 1)`.
-            lengths (Tensor): Audio sample lengths with shape `(B,)`.
+            waveforms (Tensor): Input tensor with shape (B, T, 1).
+            lengths (Tensor): Audio sample lengths with shape (B,).
 
         Returns:
-            Tensor: Output features with shape `(B, T // (hop_length * frame_stacking), D)`.
-            Tensor: Feature sequence lengths with shape `(B,)`.
+            Tensor: Output features with shape (B, T // (hop_length * frame_stacking), D).
+            Tensor: Feature sequence lengths with shape (B,).
         """
-
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
         # Extract spectrograms: (B, n_bins, T') -> (B, T', n_bins)
         specs = self.specgram(waveforms.squeeze(2)).transpose(1, 2)
-        mag, phase = specs.abs().clamp(1e-9).log(), specs.angle()
 
-        # Concatenate magnitude and phase: (B, T', 2 * n_bins)
-        features = torch.cat((mag, phase), dim=2)
+        # Extract magnitude, phase, and phase gradient
+        mag, phase = specs.abs().clamp(1e-9).log(), specs.angle()
+        phase_gradient = self.compute_phase_gradient(phase)
+
+        # Concatenate all three streams: (B, T', 3 * n_bins)
+        features = torch.cat((mag, phase, phase_gradient), dim=2)
         batch_size, num_frames, _ = features.shape
 
         # Pad to make divisible by frame_stacking
@@ -84,7 +121,7 @@ class SpectrogramProcessor(nn.Module):
             pad_frames = self.frame_stacking - remainder
             features = F.pad(features, (0, 0, 0, pad_frames))
 
-        # Reshape to stack frames: (B, T' // stack, stack * 2 * n_bins)
+        # Reshape to stack frames: (B, T' // stack, stack * 3 * n_bins)
         stacked_frames = features.size(1) // self.frame_stacking
         features = features.reshape(batch_size, stacked_frames, -1)
 
@@ -99,7 +136,10 @@ class SpectrogramProcessor(nn.Module):
 
 
 class InverseSpectrogramProcessor(nn.Module):
-    r"""Inverse spectrogram processor for reconstructing waveforms from spectrograms.
+    """iSTFT-based inverse processor for waveform reconstruction.
+
+    Predicts magnitude, real, and imaginary components, then computes phase
+    via arctan2(imag, real) to avoid phase wrapping discontinuities at ±π.
 
     Args:
         frame_stacking (int): Number of frames to unstack for upsampling.
@@ -112,19 +152,23 @@ class InverseSpectrogramProcessor(nn.Module):
         self, frame_stacking: int, window_length: int, hop_length: int, input_dim: int
     ):
         super().__init__()
+
         self.frame_stacking = frame_stacking
         self.window_length = window_length
         self.hop_length = hop_length
 
         n_bins = window_length // 2 + 1
-        stacked_dim = 2 * n_bins * frame_stacking
+        stacked_dim = 3 * n_bins * frame_stacking
 
         self.inverse_specgram = TAudio.InverseSpectrogram(
             n_fft=window_length,
             win_length=window_length,
             hop_length=hop_length,
         )
+
         self.projector = nn.Linear(input_dim, stacked_dim)
+        nn.init.xavier_uniform_(self.projector.weight)
+        nn.init.zeros_(self.projector.bias)
 
     def forward(
         self,
@@ -132,33 +176,39 @@ class InverseSpectrogramProcessor(nn.Module):
         lengths: torch.Tensor,
         max_output_length: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the inverse spectrogram processor.
+        """Forward pass of the inverse spectrogram processor.
 
         Args:
-            features (Tensor): Input tensor with shape `(B, T, D)`.
-            lengths (Tensor): Feature sequence lengths with shape `(B,)`.
-            max_output_length (int, optional): Maximum output audio length for exact reconstruction.
+            features: Input tensor with shape (B, T, D).
+            lengths: Feature sequence lengths with shape (B,).
+            max_output_length: Maximum output audio length for exact reconstruction.
 
         Returns:
-            Tensor: Output waveform tensor with shape `(B, max_output_length or inferred, 1)`.
-            Tensor: Output audio lengths with shape `(B,)`.
+            Tensor: Output waveform tensor with shape (B, max_output_length or inferred, 1).
+            Tensor: Output audio lengths with shape (B,).
         """
         batch_size, stacked_frames, _ = features.shape
         n_bins = self.window_length // 2 + 1
 
-        # Apply linear projection: (B, T, D) -> (B, T, 2 * n_bins * frame_stacking)
+        # Project to output dimension: (B, T, D) -> (B, T, 3 * n_bins * frame_stacking)
         features = self.projector(features)
 
-        # Unstack frames: (B, T, stack * 2 * n_bins) -> (B, T * stack, 2 * n_bins)
+        # Unstack frames: (B, T, stack * 3 * n_bins) -> (B, T * stack, 3 * n_bins)
         features = features.reshape(
-            batch_size, stacked_frames * self.frame_stacking, 2 * n_bins
+            batch_size, stacked_frames * self.frame_stacking, 3 * n_bins
         )
 
-        # Convert back to complex spectrogram
-        mag, phase = features.chunk(2, dim=2)
-        specs = torch.polar(mag.exp(), phase.float())
+        # Split into magnitude, real, and imaginary components
+        log_mag, real, imag = features.chunk(3, dim=2)
 
-        # Convert to waveform: (B, n_bins, T') -> (B, T_audio)
+        # Compute magnitude and phase
+        magnitude = log_mag.exp()
+        phase = torch.atan2(imag, real)
+
+        # Construct complex spectrogram: A * exp(j*ϕ)
+        specs = torch.polar(magnitude.float(), phase.float())
+
+        # Convert to waveform via inverse STFT: (B, n_bins, T') -> (B, T_audio)
         waveforms = self.inverse_specgram(
             specs.transpose(1, 2), length=max_output_length
         )
@@ -172,113 +222,6 @@ class InverseSpectrogramProcessor(nn.Module):
             output_lengths = torch.clamp(output_lengths, max=max_output_length)
 
         return waveforms.unsqueeze(2), output_lengths
-
-
-class WaveformPatcher(nn.Module):
-    r"""Converts raw waveform into patch embeddings.
-
-    Args:
-        patch_size (int): Number of audio samples per patch.
-        output_dim (int): Output embedding dimension after projection.
-    """
-
-    def __init__(self, patch_size: int, output_dim: int):
-        super().__init__()
-
-        self.patch_size = patch_size
-        self.output_dim = output_dim
-
-        self.linear1 = nn.Linear(patch_size, output_dim, bias=False)
-        self.linear2 = nn.Linear(output_dim, output_dim, bias=True)
-
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-        nn.init.zeros_(self.linear2.bias)
-
-    def forward(
-        self, waveforms: torch.Tensor, lengths: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the waveform patcher.
-
-        Args:
-            waveforms (Tensor): Input tensor with shape `(B, T, 1)`.
-            lengths (Tensor): Audio sample lengths with shape `(B,)`.
-
-        Returns:
-            Tensor: Output features with shape `(B, T // patch_size, D)`.
-            Tensor: Feature sequence lengths with shape `(B,)`.
-        """
-        if waveforms.size(2) != 1:
-            raise ValueError("The audio signal should be mono-channel.")
-
-        x = waveforms.squeeze(2)
-        batch_size, num_samples = x.shape
-
-        remainder = num_samples % self.patch_size
-        if remainder != 0:
-            x = F.pad(x, (0, self.patch_size - remainder))
-
-        num_patches = x.size(1) // self.patch_size
-        x = x.reshape(batch_size, num_patches, self.patch_size)
-
-        x = self.linear2(self.linear1(x))
-        output_lengths = torch.ceil(lengths / self.patch_size)
-
-        return x, output_lengths.to(dtype=lengths.dtype)
-
-
-class WaveformUnpatcher(nn.Module):
-    r"""Reconstructs waveform from patch embeddings.
-
-    Args:
-        patch_size (int): Number of audio samples per patch.
-        input_dim (int): Input embedding dimension from the decoder.
-        gain (float): Gain for xavier initialization of output layer.
-    """
-
-    def __init__(self, patch_size: int, input_dim: int, gain: float = 0.05):
-        super().__init__()
-
-        self.patch_size = patch_size
-        self.input_dim = input_dim
-
-        self.linear1 = nn.Linear(input_dim, input_dim, bias=True)
-        self.linear2 = nn.Linear(input_dim, patch_size, bias=False)
-
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.zeros_(self.linear1.bias)
-        nn.init.xavier_uniform_(self.linear2.weight, gain=gain)
-
-    def forward(
-        self,
-        features: torch.Tensor,
-        lengths: torch.Tensor,
-        max_output_length: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the waveform unpatcher.
-
-        Args:
-            features (Tensor): Input tensor with shape `(B, N, D)` where N is the
-                number of patches and D is the embedding dimension.
-            lengths (Tensor): Feature sequence lengths (number of valid patches)
-                with shape `(B,)`.
-            max_output_length (int, optional): Maximum output audio length for exact
-                reconstruction. If provided, output will be trimmed/padded to this length.
-
-        Returns:
-            Tensor: Output waveform tensor with shape `(B, T, 1)` where T is either
-                `max_output_length` or `N * patch_size`.
-            Tensor: Output audio lengths with shape `(B,)`.
-        """
-        x = self.linear2(self.linear1(features))
-        x = x.reshape(features.size(0), -1)
-        output_lengths = lengths * self.patch_size
-
-        if max_output_length is not None:
-            x = F.pad(x, (0, max_output_length - x.size(1)))
-            output_lengths = torch.clamp(output_lengths, max=max_output_length)
-
-        return x.unsqueeze(2), output_lengths
 
 
 class SpecAugmentProcessor(nn.Module):
