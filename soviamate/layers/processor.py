@@ -27,9 +27,9 @@ from torch.nn.utils.rnn import pad_sequence
 class SpectrogramProcessor(nn.Module):
     """STFT-based spectrogram processor with 3-stream input.
 
-    Extracts magnitude, phase, and phase gradient features from audio waveforms.
-    The phase gradient provides temporal continuity information that helps
-    maintain phase coherence during reconstruction.
+    Extracts log-magnitude, normalized real, and normalized imaginary components
+    from audio waveforms. Real and imaginary are normalized to the unit circle,
+    providing a smooth representation of phase without wrap-around discontinuities.
 
     Args:
         frame_stacking (int): Number of frames to stack for downsampling.
@@ -61,33 +61,6 @@ class SpectrogramProcessor(nn.Module):
         nn.init.xavier_uniform_(self.projector.weight)
         nn.init.zeros_(self.projector.bias)
 
-    def compute_phase_gradient(self, phase: torch.Tensor) -> torch.Tensor:
-        """Compute temporal gradient of unwrapped phase.
-
-        ∇ϕ[m,k] = ϕ'[m,k] - ϕ'[m-1,k] for m > 0, else 0
-
-        The gradient captures frame-to-frame phase changes, computed by taking
-        the phase difference and correcting for 2π discontinuities.
-
-        Args:
-            phase: Wrapped phase tensor of shape (B, T, F).
-
-        Returns:
-            Phase gradient tensor of shape (B, T, F).
-        """
-        # Compute phase difference between adjacent frames
-        phase_diff = torch.diff(phase, dim=1)
-
-        # Unwrap: correct jumps larger than π (this gives the gradient directly)
-        phase_gradient = phase_diff - 2 * torch.pi * torch.round(
-            phase_diff / (2 * torch.pi)
-        )
-
-        # Pad first frame with zeros (gradient undefined at m=0)
-        phase_gradient = F.pad(phase_gradient, (0, 0, 1, 0), value=0.0)
-
-        return phase_gradient
-
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -104,15 +77,19 @@ class SpectrogramProcessor(nn.Module):
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        # Extract spectrograms: (B, n_bins, T') -> (B, T', n_bins)
+        # Extract complex spectrograms: (B, n_bins, T') -> (B, T', n_bins)
         specs = self.specgram(waveforms.squeeze(2)).transpose(1, 2)
 
-        # Extract magnitude, phase, and phase gradient
-        mag, phase = specs.abs().clamp(1e-9).log(), specs.angle()
-        phase_gradient = self.compute_phase_gradient(phase)
+        # Extract log-magnitude
+        mag = specs.abs().clamp(min=1e-9)
+        log_mag = mag.log()
+
+        # Extract normalized real and imaginary
+        real = specs.real / mag
+        imag = specs.imag / mag
 
         # Concatenate all three streams: (B, T', 3 * n_bins)
-        features = torch.cat((mag, phase, phase_gradient), dim=2)
+        features = torch.cat((log_mag, real, imag), dim=2)
         batch_size, num_frames, _ = features.shape
 
         # Pad to make divisible by frame_stacking
