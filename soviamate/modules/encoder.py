@@ -112,6 +112,7 @@ class AudioEncoder(nn.Module):
         lengths: torch.Tensor,
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
+        return_phase: bool = False,
     ):
         r"""Forward pass of the audio encoder.
 
@@ -123,16 +124,22 @@ class AudioEncoder(nn.Module):
             lengths (Tensor): length of the input tensor.
             prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
             prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
+            return_phase (bool): If True, also return phase tensor for truth phase reconstruction.
 
         Returns:
             Tensor: output tensor with shape `(B, T // window_size, D)`.
             Tensor: length of the output tensor.
+            Tensor (optional): phase tensor with shape `(B, T, stack * n_bins)` if return_phase=True.
         """
 
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        xs, x_lens = self.extractor(waveforms, lengths)
+        if return_phase:
+            xs, x_lens, phase = self.extractor(waveforms, lengths, return_phase=True)
+        else:
+            xs, x_lens = self.extractor(waveforms, lengths)
+            phase = None
 
         if self.training:
             chunk_size, left_context = sample_chunk_config(
@@ -161,6 +168,8 @@ class AudioEncoder(nn.Module):
                 xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
             )
 
+        if return_phase:
+            return xs, x_lens, phase
         return xs, x_lens
 
     @torch.jit.export

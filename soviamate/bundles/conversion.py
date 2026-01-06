@@ -282,13 +282,17 @@ class AudioCodecBundle(nn.Module):
         )
 
     def _process(
-        self, codec_inputs: CodecInputs, return_tokens: bool = False
+        self,
+        codec_inputs: CodecInputs,
+        return_tokens: bool = False,
+        use_truth_phase: bool = False,
     ) -> CodecOutputs:
         """Process audio through the codec pipeline with optional speaker adaptation.
 
         Args:
             codec_inputs: Structured inputs with batched tensors.
             return_tokens: Whether to return ASR tokens.
+            use_truth_phase: Whether to use ground truth phase from source audio for reconstruction.
 
         Returns:
             CodecOutputs with processed audio and optional tokens.
@@ -305,10 +309,18 @@ class AudioCodecBundle(nn.Module):
                 "Cannot apply speaker adaptation: speaker_adapter not available. "
                 "Load checkpoint with speaker_adapter component."
             )
-        # Encode source audio
-        source_features, source_lengths = self.audio_encoder(
-            codec_inputs.source_audios, codec_inputs.source_lengths
-        )
+        # Encode source audio with optional phase extraction
+        if use_truth_phase:
+            source_features, source_lengths, truth_phase = self.audio_encoder(
+                codec_inputs.source_audios,
+                codec_inputs.source_lengths,
+                return_phase=True,
+            )
+        else:
+            source_features, source_lengths = self.audio_encoder(
+                codec_inputs.source_audios, codec_inputs.source_lengths
+            )
+            truth_phase = None
 
         # ASR decoding (optional): use source features only
         output_tokens = None
@@ -336,13 +348,14 @@ class AudioCodecBundle(nn.Module):
         # Calculate maximum output length for exact reconstruction
         max_output_length = codec_inputs.source_lengths.max().item()
 
-        # Decode with speaker conditioning
+        # Decode with speaker conditioning and optional truth phase
         output_audios, output_lengths = self.audio_decoder(
             quantized_outputs,
             quantized_lengths,
             speaker_embeddings,
             speaker_lengths,
             max_output_length,
+            truth_phase,
         )
 
         return CodecOutputs(
@@ -391,6 +404,7 @@ class AudioCodecBundle(nn.Module):
         source_audios: Union[torch.Tensor, List[torch.Tensor]],
         prompt_audios: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
         return_tokens: bool = False,
+        use_truth_phase: bool = True,
     ) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
         Optional[Union[torch.Tensor, List[torch.Tensor]]],
@@ -409,6 +423,10 @@ class AudioCodecBundle(nn.Module):
                 Single tensor (1, T) or list [(1, T1), (1, T2), ...].
                 Used to extract target speaker identity for voice conversion.
             return_tokens: Whether to return ASR tokens (requires text_decoder).
+            use_truth_phase: Whether to use ground truth phase from source audio
+                for reconstruction. When True, extracts phase from source audio
+                and uses it directly in iSTFT instead of reconstructing phase
+                from model features. Useful for debugging magnitude reconstruction.
 
         Returns:
             audios: Single tensor (1, T') or list [(1, T1'), ...] matching input format.
@@ -423,10 +441,15 @@ class AudioCodecBundle(nn.Module):
 
             >>> # Codec with ASR transcription
             >>> reconstructed_audio, transcript = bundle(audio, return_tokens=True)
+
+            >>> # Use truth phase for debugging magnitude reconstruction
+            >>> reconstructed_audio, _ = bundle(audio, use_truth_phase=True)
         """
         is_list = isinstance(source_audios, list)
 
         inputs = self._pack_inputs(source_audios, prompt_audios)
-        outputs = self._process(inputs, return_tokens=return_tokens)
+        outputs = self._process(
+            inputs, return_tokens=return_tokens, use_truth_phase=use_truth_phase
+        )
 
         return self._unpack_outputs(outputs, as_list=is_list)

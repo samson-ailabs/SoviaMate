@@ -113,6 +113,7 @@ class AudioDecoder(nn.Module):
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
         max_output_length: int = None,
+        truth_phase: torch.Tensor = None,
     ):
         r"""Forward pass of the audio decoder.
 
@@ -125,6 +126,8 @@ class AudioDecoder(nn.Module):
             prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
             prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
             max_output_length (int, optional): Maximum output audio length for exact reconstruction.
+            truth_phase (Tensor, optional): Ground truth phase tensor with shape `(B, T, stack * n_bins)`.
+                If provided, blends with predicted phase in vocoder.
 
         Returns:
             Tensor: output tensor with shape `(B, T * chunk_size, 1)`.
@@ -164,7 +167,9 @@ class AudioDecoder(nn.Module):
                 xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
             )
 
-        xs, x_lens = self.vocoder(xs, x_lens, max_output_length=max_output_length)
+        xs, x_lens = self.vocoder(
+            xs, x_lens, max_output_length=max_output_length, truth_phase=truth_phase
+        )
 
         return xs, x_lens
 

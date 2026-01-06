@@ -62,17 +62,22 @@ class SpectrogramProcessor(nn.Module):
         nn.init.zeros_(self.projector.bias)
 
     def forward(
-        self, waveforms: torch.Tensor, lengths: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, waveforms: torch.Tensor, lengths: torch.Tensor, return_phase: bool = False
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """Forward pass of the spectrogram processor.
 
         Args:
             waveforms (Tensor): Input tensor with shape (B, T, 1).
             lengths (Tensor): Audio sample lengths with shape (B,).
+            return_phase (bool): If True, also return phase tensor for truth phase reconstruction.
 
         Returns:
             Tensor: Output features with shape (B, T // (hop_length * frame_stacking), D).
             Tensor: Feature sequence lengths with shape (B,).
+            Tensor (optional): Phase tensor with shape (B, T', n_bins) if return_phase=True.
         """
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
@@ -88,6 +93,9 @@ class SpectrogramProcessor(nn.Module):
         real = specs.real / mag
         imag = specs.imag / mag
 
+        # Compute phase for optional return (before stacking)
+        phase = torch.atan2(imag, real) if return_phase else None
+
         # Concatenate all three streams: (B, T', 3 * n_bins)
         features = torch.cat((log_mag, real, imag), dim=2)
         batch_size, num_frames, _ = features.shape
@@ -97,10 +105,19 @@ class SpectrogramProcessor(nn.Module):
         if remainder != 0:
             pad_frames = self.frame_stacking - remainder
             features = F.pad(features, (0, 0, 0, pad_frames))
+            if phase is not None:
+                phase = F.pad(phase, (0, 0, 0, pad_frames))
 
         # Reshape to stack frames: (B, T' // stack, stack * 3 * n_bins)
         stacked_frames = features.size(1) // self.frame_stacking
         features = features.reshape(batch_size, stacked_frames, -1)
+
+        # Stack phase frames as well if returning: (B, T' // stack, stack * n_bins)
+        if phase is not None:
+            n_bins = self.window_length // 2 + 1
+            phase = phase.reshape(
+                batch_size, stacked_frames, self.frame_stacking * n_bins
+            )
 
         # Calculate output lengths (spectrogram frames / frame_stacking)
         spec_lengths = torch.floor(lengths / self.hop_length) + 1
@@ -109,6 +126,8 @@ class SpectrogramProcessor(nn.Module):
         # Apply linear projection to desired output dimension
         features = self.projector(features)
 
+        if return_phase:
+            return features, output_lengths.to(dtype=lengths.dtype), phase
         return features, output_lengths.to(dtype=lengths.dtype)
 
 
@@ -152,6 +171,7 @@ class InverseSpectrogramProcessor(nn.Module):
         features: torch.Tensor,
         lengths: torch.Tensor,
         max_output_length: Optional[int] = None,
+        truth_phase: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the inverse spectrogram processor.
 
@@ -159,6 +179,8 @@ class InverseSpectrogramProcessor(nn.Module):
             features: Input tensor with shape (B, T, D).
             lengths: Feature sequence lengths with shape (B,).
             max_output_length: Maximum output audio length for exact reconstruction.
+            truth_phase: Optional ground truth phase tensor with shape (B, T, stack * n_bins).
+                If provided, uses this instead of reconstructing phase from features.
 
         Returns:
             Tensor: Output waveform tensor with shape (B, max_output_length or inferred, 1).
@@ -178,9 +200,17 @@ class InverseSpectrogramProcessor(nn.Module):
         # Split into magnitude, real, and imaginary components
         log_mag, real, imag = features.chunk(3, dim=2)
 
-        # Compute magnitude and phase
+        # Compute magnitude
         magnitude = log_mag.exp()
-        phase = torch.atan2(imag, real)
+
+        # Use truth phase if provided, otherwise reconstruct from features
+        if truth_phase is not None:
+            # Unstack truth phase: (B, T, stack * n_bins) -> (B, T * stack, n_bins)
+            phase = truth_phase.reshape(
+                batch_size, stacked_frames * self.frame_stacking, n_bins
+            )
+        else:
+            phase = torch.atan2(imag, real)
 
         # Construct complex spectrogram: A * exp(j*ϕ)
         specs = torch.polar(magnitude.float(), phase.float())

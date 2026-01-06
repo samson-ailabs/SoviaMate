@@ -63,23 +63,23 @@ task:
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
 
-    # splice_out:
-    #   _target_: soviamate.layers.processor.SpliceOutProcessor
-    #   num_splices: 4
-    #   max_splice_length: 5
-    #   probability: 0.5
+    splice_out:
+      _target_: soviamate.layers.processor.SpliceOutProcessor
+      num_splices: 4
+      max_splice_length: 5
+      probability: 0.5
 
-    # text_decoder:
-    #   _target_: soviamate.modules.decoder.TextDecoder
-    #   output_dim: *vocab_size
-    #   num_layers: 2
-    #   d_model: *d_model
-    #   ffn_dim: 4096
-    #   num_heads: 8
-    #   kernel_size: 9
-    #   dropout: 0.1
-    #   dynamic_chunk_sizes: *dynamic_chunk_sizes
-    #   full_context_prob: *full_context_prob
+    text_decoder:
+      _target_: soviamate.modules.decoder.TextDecoder
+      output_dim: *vocab_size
+      num_layers: 2
+      d_model: *d_model
+      ffn_dim: 4096
+      num_heads: 8
+      kernel_size: 9
+      dropout: 0.1
+      dynamic_chunk_sizes: *dynamic_chunk_sizes
+      full_context_prob: *full_context_prob
 
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
@@ -122,9 +122,9 @@ task:
     adv_loss:
       _target_: soviamate.modules.criterion.HingeAdversarialLoss
 
-    # text_loss:
-    #   _target_: soviamate.modules.criterion.SequenceToSequenceLoss
-    #   zero_infinity: true
+    text_loss:
+      _target_: soviamate.modules.criterion.SequenceToSequenceLoss
+      zero_infinity: true
 
     # speaker_loss:
     #   _target_: soviamate.modules.criterion.SequenceContrastiveLoss
@@ -187,7 +187,7 @@ loggers:
     default_hp_metric: false
 
 trainer:
-  devices: [0, 1]
+  devices: [6, 7]
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
