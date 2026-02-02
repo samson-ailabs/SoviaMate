@@ -14,7 +14,7 @@
 
 """Discriminators for adversarial training"""
 
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -115,26 +115,21 @@ class DiscriminatorP(nn.Module):
 
         self.proj = weight_norm(nn.Conv2d(1024, 1, (1, 3), (1, 1), (0, 1)))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through filter bank discriminator.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            Tuple of (logits, features) where:
-                - logits: Discriminator logits of shape (B, N).
-                - features: List of intermediate feature maps from each conv layer.
+            Discriminator logits of shape (B, N).
         """
         x = self.pqmf(x).unsqueeze(1)
 
-        features = []
         for conv in self.convs:
             x = F.leaky_relu(conv(x), LRELU_SLOPE)
-            features.append(x)
 
-        logits = self.proj(x).flatten(1)
-        return logits, features
+        return self.proj(x).flatten(1)
 
 
 class MultiPeriodDiscriminator(nn.Module):
@@ -162,28 +157,16 @@ class MultiPeriodDiscriminator(nn.Module):
             ]
         )
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         """Forward pass through all period discriminators.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            Tuple of (logits_list, features_list) where:
-                - logits_list: List of logits from each discriminator.
-                - features_list: List of feature lists from each discriminator.
+            List of logits from each discriminator.
         """
-        logits_list = []
-        features_list = []
-
-        for disc in self.discriminators:
-            logits, features = disc(x)
-            logits_list.append(logits)
-            features_list.append(features)
-
-        return logits_list, features_list
+        return [disc(x) for disc in self.discriminators]
 
 
 class DiscriminatorR(nn.Module):
@@ -216,16 +199,14 @@ class DiscriminatorR(nn.Module):
 
         self.proj = weight_norm(nn.Conv2d(256, 1, (3, 3), (1, 1), (1, 1)))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through resolution discriminator.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            Tuple of (logits, features) where:
-                - logits: Discriminator logits of shape (B, N).
-                - features: List of intermediate feature maps from each conv layer.
+            Discriminator logits of shape (B, N).
         """
         spec = self.spec(x.squeeze(1))
         spec = spec[:, :-1, :-1]  # Omit Nyquist and last frame
@@ -233,13 +214,10 @@ class DiscriminatorR(nn.Module):
         x = torch.view_as_real(spec)
         x = x.permute(0, 3, 2, 1)  # (B, 2, T, F)
 
-        features = []
         for conv in self.convs:
             x = F.leaky_relu(conv(x), LRELU_SLOPE)
-            features.append(x)
 
-        logits = self.proj(x).flatten(1)
-        return logits, features
+        return self.proj(x).flatten(1)
 
 
 class MultiResolutionDiscriminator(nn.Module):
@@ -264,28 +242,16 @@ class MultiResolutionDiscriminator(nn.Module):
             ]
         )
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         """Forward pass through all resolution discriminators.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            Tuple of (logits_list, features_list) where:
-                - logits_list: List of logits from each discriminator.
-                - features_list: List of feature lists from each discriminator.
+            List of logits from each discriminator.
         """
-        logits_list = []
-        features_list = []
-
-        for disc in self.discriminators:
-            logits, features = disc(x)
-            logits_list.append(logits)
-            features_list.append(features)
-
-        return logits_list, features_list
+        return [disc(x) for disc in self.discriminators]
 
 
 class MultiScaleDiscriminators(nn.Module):
@@ -315,12 +281,7 @@ class MultiScaleDiscriminators(nn.Module):
 
     def forward(
         self, fakes: torch.Tensor, reals: torch.Tensor | None = None
-    ) -> Tuple[
-        List[torch.Tensor],
-        List[torch.Tensor],
-        List[List[torch.Tensor]],
-        List[List[torch.Tensor]],
-    ]:
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Process waveforms through MPD and MRD discriminators.
 
         Args:
@@ -328,42 +289,17 @@ class MultiScaleDiscriminators(nn.Module):
             reals: Optional real waveforms. If provided, batches with fakes for efficiency.
 
         Returns:
-            Tuple of (fake_logits, real_logits, fake_features, real_features).
-            If reals is None, real_logits and real_features are empty lists.
+            Tuple of (fake_logits, real_logits).
+            If reals is None, real_logits is an empty list.
         """
-        # Single input: only fakes
         if reals is None:
-            mpd_logits, mpd_features = self.mpd(fakes)
-            mrd_logits, mrd_features = self.mrd(fakes)
+            fake_logits = self.mpd(fakes) + self.mrd(fakes)
+            return fake_logits, []
 
-            fake_logits = mpd_logits + mrd_logits
-            fake_features = mpd_features + mrd_features
-
-            return fake_logits, [], fake_features, []
-
-        # Batched: fakes + reals
         combined = torch.cat([fakes, reals], dim=0)
+        all_logits = self.mpd(combined) + self.mrd(combined)
 
-        mpd_logits, mpd_features = self.mpd(combined)
-        mrd_logits, mrd_features = self.mrd(combined)
+        pairs = [logits.chunk(2, dim=0) for logits in all_logits]
+        fake_logits, real_logits = zip(*pairs)
 
-        # Combine MPD and MRD outputs
-        all_logits = mpd_logits + mrd_logits
-        all_features = mpd_features + mrd_features
-
-        # Split into fake and real
-        fake_logits, real_logits = [], []
-        fake_features, real_features = [], []
-
-        for logits in all_logits:
-            f_logits, r_logits = logits.chunk(2, dim=0)
-            fake_logits.append(f_logits)
-            real_logits.append(r_logits)
-
-        for features in all_features:
-            f_feats = [feat.chunk(2, dim=0)[0] for feat in features]
-            r_feats = [feat.chunk(2, dim=0)[1] for feat in features]
-            fake_features.append(f_feats)
-            real_features.append(r_feats)
-
-        return fake_logits, real_logits, fake_features, real_features
+        return list(fake_logits), list(real_logits)

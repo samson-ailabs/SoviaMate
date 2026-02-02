@@ -25,38 +25,6 @@ import torchaudio.transforms as T
 from soviamate.utils.helper import make_padding_mask
 
 
-class HingeAdversarialLoss(nn.Module):
-    r"""Hinge GAN loss for multi-scale discriminators."""
-
-    def forward(
-        self,
-        fake_logits: List[torch.Tensor],
-        real_logits: List[torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        r"""Compute the hinge adversarial loss.
-
-        Args:
-            fake_logits: List of discriminator outputs for fake samples.
-            real_logits: List of discriminator outputs for real samples.
-                If None, computes generator loss; otherwise discriminator loss.
-
-        Returns:
-            Tensor: Hinge adversarial loss.
-        """
-        loss = 0.0
-
-        if real_logits is None:
-            # Generator loss: max(0, 1 - D(fake))
-            for fake in fake_logits:
-                loss += F.relu(1.0 - fake).mean()
-        else:
-            # Discriminator loss: max(0, 1 - D(real)) + max(0, 1 + D(fake))
-            for real, fake in zip(real_logits, fake_logits):
-                loss += F.relu(1.0 - real).mean() + F.relu(1.0 + fake).mean()
-
-        return loss / len(fake_logits)
-
-
 class LeastSquaresAdversarialLoss(nn.Module):
     r"""Least Squares GAN loss for multi-scale discriminators."""
 
@@ -87,54 +55,6 @@ class LeastSquaresAdversarialLoss(nn.Module):
                 loss += torch.mean((real - 1) ** 2) + torch.mean(fake**2)
 
         return loss / len(fake_logits)
-
-
-class FeatureMatchingLoss(nn.Module):
-    """Feature matching loss for GAN training.
-
-    Args:
-        scale_invariant: If True, normalize each layer's loss by the mean
-            absolute value of real features. Default: False.
-        eps: Small constant for numerical stability in scale_invariant mode.
-    """
-
-    def __init__(self, scale_invariant: bool = False, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.scale_invariant = scale_invariant
-        self.eps = eps
-
-    def forward(
-        self,
-        fake_features: List[List[torch.Tensor]],
-        real_features: List[List[torch.Tensor]],
-    ) -> torch.Tensor:
-        """Compute feature matching loss.
-
-        Args:
-            fake_features: List of feature lists from each discriminator scale.
-                Shape: [num_discs][num_layers](B, C, T, F)
-            real_features: List of feature lists from each discriminator scale.
-                Shape: [num_discs][num_layers](B, C, T, F)
-
-        Returns:
-            Scalar feature matching loss averaged across all discriminators and layers.
-        """
-        loss = 0.0
-        num_features = 0
-
-        for fake_feats, real_feats in zip(fake_features, real_features):
-            for fake_feat, real_feat in zip(fake_feats, real_feats):
-                real_feat_detached = real_feat.detach()
-                l1_loss = F.l1_loss(fake_feat, real_feat_detached)
-
-                if self.scale_invariant:
-                    feat_scale = torch.mean(torch.abs(real_feat_detached)) + self.eps
-                    l1_loss = l1_loss / feat_scale
-
-                loss = loss + l1_loss
-                num_features += 1
-
-        return loss / num_features if num_features > 0 else loss
 
 
 class MelSpectralEnergyDistanceLoss(nn.Module):
