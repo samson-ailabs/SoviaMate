@@ -153,10 +153,10 @@ class AudioCodecTask(L.LightningModule):
             source_list = unpad_sequence(
                 source_features, source_feature_lengths, batch_first=True
             )
-
             asr_list = [
                 torch.cat([p, s], dim=0) for p, s in zip(prompt_list, source_list)
             ]
+
             asr_features = pad_sequence(asr_list, batch_first=True)
             asr_feature_lengths = prompt_feature_lengths + source_feature_lengths
 

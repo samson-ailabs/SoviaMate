@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multimodal Decoder for audio and visual inputs"""
+"""Decoder modules for reconstructing outputs from latent representations."""
 
 from typing import List, Tuple
 
@@ -76,6 +76,7 @@ class AudioDecoder(nn.Module):
         self.frame_stacking = frame_stacking
         self.window_length = window_length
         self.hop_length = hop_length
+
         self.embed_dim = d_model
         self.kernel_size = kernel_size
         self.use_cross_attn = use_cross_attn
@@ -113,7 +114,7 @@ class AudioDecoder(nn.Module):
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
         max_output_length: int = None,
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass of the audio decoder.
 
         During training, chunk sizes are randomly sampled. During inference,
@@ -175,7 +176,7 @@ class AudioDecoder(nn.Module):
         caches: List[List[torch.Tensor]] = None,
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
-    ):
+    ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
         r"""Inference for streaming audio input.
 
         Args:

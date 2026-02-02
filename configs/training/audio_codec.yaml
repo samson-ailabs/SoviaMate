@@ -4,34 +4,35 @@ task:
   data:
     tokenizer: &tokenizer
       _target_: soviamate.datas.tokenizer.SentencePieceTokenizer
-      model_path: tokenizers/libri_speech_tokenizer.model
+      model_path: tokenizers/libri_heavy_tokenizer.model
       vocab_size: &vocab_size 1025  # 1024 BPE tokens + 1 blank token (index 0)
       character_coverage: 0.9995
       model_type: bpe
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /vast/tts/samson/LibriSpeech/trainset.jsonl
+      filepaths: /vast/tts/samson/Libri-Heavy/trainset.jsonl
       tokenizer: *tokenizer
 
-      # transforms:
-      #   content:
-      #     perturb:
-      #       _target_: soviamate.datas.transform.SpeakerPerturbation
-      #       min_formant_factor: 0.8
-      #       max_formant_factor: 1.2
-      #       probability: 1.0
+      transforms:
+        source:
+          spectral:
+            _target_: soviamate.datas.transform.SpectralPerturbation
+            num_peak: 8
+            q_min: 2.0
+            q_max: 5.0
+            probability: 1.0
 
-      #   speaker:
-      #     trimmer:
-      #       _target_: soviamate.datas.transform.AudioTrimmer
-      #       percentage: 0.3
-      #       min_duration: 0.7
-      #       probability: 1.0
+          voice:
+            _target_: soviamate.datas.transform.VoicePerturbation
+            formant_shift: 1.4
+            pitch_shift: 2.0
+            pitch_range: 1.5
+            probability: 1.0
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /vast/tts/samson/LibriSpeech/valset.jsonl
+      filepaths: /vast/tts/samson/Libri-Heavy/valset.jsonl
       tokenizer: *tokenizer
 
     loader:
@@ -63,23 +64,23 @@ task:
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
 
-    # splice_out:
-    #   _target_: soviamate.layers.processor.SpliceOutProcessor
-    #   num_splices: 4
-    #   max_splice_length: 5
-    #   probability: 0.5
+    splice_out:
+      _target_: soviamate.layers.processor.SpliceOutProcessor
+      num_splices: 4
+      max_splice_length: 5
+      probability: 0.5
 
-    # text_decoder:
-    #   _target_: soviamate.modules.decoder.TextDecoder
-    #   output_dim: *vocab_size
-    #   num_layers: 2
-    #   d_model: *d_model
-    #   ffn_dim: 4096
-    #   num_heads: 8
-    #   kernel_size: 9
-    #   dropout: 0.1
-    #   dynamic_chunk_sizes: *dynamic_chunk_sizes
-    #   full_context_prob: *full_context_prob
+    text_decoder:
+      _target_: soviamate.modules.decoder.TextDecoder
+      output_dim: *vocab_size
+      num_layers: 2
+      d_model: *d_model
+      ffn_dim: 4096
+      num_heads: 8
+      kernel_size: 9
+      dropout: 0.1
+      dynamic_chunk_sizes: *dynamic_chunk_sizes
+      full_context_prob: *full_context_prob
 
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
@@ -94,6 +95,8 @@ task:
       dropout: 0.1
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
+      use_cross_attn: true
+      cross_attn_dim: *d_model
 
     audio_quantizer:
       _target_: soviamate.modules.quantizer.FiniteScalarQuantizer
@@ -101,17 +104,20 @@ task:
       fsq_levels: [16, 16, 16, 16, 16, 16, 16, 16]
       noise_dropout: 0.5
 
-    # speaker_adapter:
-    #   _target_: soviamate.modules.adapter.SpeakerAdapter
-    #   model_name: WAVLM_LARGE
-    #   extract_layer: 4
-    #   output_dim: *speaker_dim
-    #   dropout: 0.1
+    speaker_adapter:
+      _target_: soviamate.modules.adapter.SpeakerAdapter
+      output_dim: *d_model
+      num_layers: 6
+      model_name: WAVLM_LARGE
+      postnet_dims: [128, 256, 512]
 
     discriminator:
-      _target_: soviamate.modules.discriminator.MultiSpectroStreamDiscriminators
-      n_ffts: [128, 256, 512, 1024, 2048, 4096]
-      hop_lengths: [64, 128, 256, 512, 1024, 2048]
+      _target_: soviamate.modules.discriminator.MultiScaleDiscriminators
+      periods: [2, 3, 5, 7, 11]
+      cutoffs: [0.253881, 0.170546, 0.103881, 0.075310, 0.049338]
+      n_ffts: [512, 1024, 2048]
+      win_lengths: [512, 1024, 2048]
+      hop_lengths: [128, 256, 512]
 
     audio_loss:
       _target_: soviamate.modules.criterion.MelSpectralEnergyDistanceLoss
@@ -120,28 +126,30 @@ task:
       mel_bins: [10, 20, 40, 80, 160, 320]
 
     adv_loss:
-      _target_: soviamate.modules.criterion.HingeAdversarialLoss
+      _target_: soviamate.modules.criterion.LeastSquaresAdversarialLoss
 
-    # text_loss:
-    #   _target_: soviamate.modules.criterion.SequenceToSequenceLoss
-    #   zero_infinity: true
+    text_loss:
+      _target_: soviamate.modules.criterion.SequenceToSequenceLoss
+      zero_infinity: true
 
-    # speaker_loss:
-    #   _target_: soviamate.modules.criterion.SequenceContrastiveLoss
-    #   num_samples: 1024
-    #   lambda_inv: 5.0
-    #   lambda_var: 1.0
-    #   lambda_cov: 1.0
+    speaker_loss:
+      _target_: soviamate.modules.criterion.SequenceContrastiveLoss
+      input_dim: *d_model
+      projector_dim: 4096
+      lambda_inv: 25.0
+      lambda_var: 25.0
+      lambda_cov: 1.0
+      variance_gamma: 1.0
 
   optim:
-    total_steps: &total_steps 400000
+    total_steps: &total_steps 900000
     pct_start: &pct_start 0.01
 
     generator:
       optimizer:
         _target_: torch.optim.AdamW
         lr: 1.0
-        betas: [0.8, 0.99]
+        betas: [0.9, 0.95]
         fused: true
 
       scheduler:
@@ -156,7 +164,7 @@ task:
       optimizer:
         _target_: torch.optim.AdamW
         lr: 1.0
-        betas: [0.8, 0.99]
+        betas: [0.9, 0.95]
         fused: true
 
       scheduler:
@@ -177,18 +185,20 @@ callbacks:
     monitor: val_loss
     save_top_k: 10
     save_last: true
+    every_n_train_steps: 100000
 
 loggers:
   tb:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     save_dir: lightning_logs
-    name: libri_speech_codec
+    name: libri_heavy_codec
     version: null
     default_hp_metric: false
 
 trainer:
-  devices: [0, 1]
+  devices: 8
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 50
+  max_epochs: 6
+  val_check_interval: 50000

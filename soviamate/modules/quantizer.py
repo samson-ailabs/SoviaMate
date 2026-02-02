@@ -54,22 +54,7 @@ class FiniteScalarQuantizer(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        """Initialize weights for proper variance propagation.
-
-        pre_quant (d_model → fsq_dim): Uses gain to preserve unit variance.
-        With Xavier on asymmetric layers (fan_in >> fan_out), variance amplifies:
-            Var(output) = fan_in × 2/(fan_in + fan_out) × Var(input)
-
-        For fan_in=1024, fan_out=8: Var(output) = 1.98 × Var(input), std = 1.41
-        This causes tanh saturation and poor codebook utilization.
-
-        To preserve unit variance:
-            gain = √((fan_in + fan_out) / (2 × fan_in))
-            For 1024 → 8: gain = √(1032/2048) = 0.71
-
-        post_quant (fsq_dim → d_model): Standard gain for dimension expansion.
-        Decoder has LayerNorm which normalizes input, so exact variance less critical.
-        """
+        """Initialize weights for proper variance propagation."""
         fan_in = self.pre_quant.in_features
         fan_out = self.pre_quant.out_features
         pre_gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))

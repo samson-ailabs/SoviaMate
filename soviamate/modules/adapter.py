@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Speaker feature extraction module for multi-speaker synthesis."""
+"""Adapter modules for extracting conditioning features."""
 
 from typing import Literal, Tuple
 
