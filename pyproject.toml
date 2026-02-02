@@ -28,8 +28,12 @@ dev = [
 ]
 test = [
     "torchmetrics[audio]>=1.8.2",
+    "utmosv2",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git" }
