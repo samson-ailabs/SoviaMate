@@ -107,7 +107,7 @@ task:
     speaker_adapter:
       _target_: soviamate.modules.adapter.SpeakerAdapter
       output_dim: *d_model
-      num_layers: 6
+      layer_index: 6
       model_name: WAVLM_LARGE
       postnet_dims: [128, 256, 512]
 

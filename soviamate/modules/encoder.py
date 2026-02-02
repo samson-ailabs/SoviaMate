@@ -49,6 +49,7 @@ class AudioEncoder(nn.Module):
         full_context_prob (float, optional): probability of full context mode. Default: 0.0.
         use_cross_attn (bool, optional): use cross-attention module. Default: False.
         cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
+        epsilon (float, optional): epsilon for layer normalization. Default: 1e-2.
     """
 
     def __init__(
@@ -67,6 +68,7 @@ class AudioEncoder(nn.Module):
         full_context_prob: float = 0.0,
         use_cross_attn: bool = False,
         cross_attn_dim: int = 256,
+        epsilon: float = 1e-2,
     ):
         super().__init__()
 
@@ -102,6 +104,7 @@ class AudioEncoder(nn.Module):
                     dropout,
                     use_cross_attn,
                     cross_attn_dim,
+                    epsilon,
                 )
                 for _ in range(num_layers)
             ]
@@ -110,7 +113,7 @@ class AudioEncoder(nn.Module):
     def forward(
         self,
         waveforms: torch.Tensor,
-        lengths: torch.Tensor,
+        waveform_lengths: torch.Tensor,
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -133,7 +136,7 @@ class AudioEncoder(nn.Module):
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
-        xs, x_lens = self.extractor(waveforms, lengths)
+        xs, x_lens = self.extractor(waveforms, waveform_lengths)
 
         if self.training:
             chunk_size, left_context = sample_chunk_config(

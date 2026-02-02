@@ -92,7 +92,7 @@ class SpeakerAdapter(nn.Module):
 
     Args:
         output_dim (int): Output dimension for decoder cross-attention.
-        num_layers (int): Number of WavLM layers to use. Defaults to 6.
+        layer_index (int): WavLM layer index to use. Defaults to 6.
         model_name (str): Pre-trained WavLM model identifier. Defaults to "WAVLM_LARGE".
         postnet_dims (tuple): Hidden dimensions for postnet blocks. Defaults to (128, 256, 512).
     """
@@ -100,13 +100,13 @@ class SpeakerAdapter(nn.Module):
     def __init__(
         self,
         output_dim: int,
-        num_layers: int = 6,
+        layer_index: int = 6,
         model_name: Literal["WAVLM_LARGE", "WAVLM_BASE"] = "WAVLM_LARGE",
         postnet_dims: Tuple[int, ...] = (128, 256, 512),
     ):
         super().__init__()
 
-        self.num_layers = num_layers
+        self.layer_index = layer_index
         self.output_dim = output_dim
 
         bundle = getattr(torchaudio.pipelines, model_name)
@@ -114,8 +114,6 @@ class SpeakerAdapter(nn.Module):
 
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
-
-        self.layer_weights = nn.Parameter(torch.ones(num_layers))
 
         feature_dim = 1024 if model_name == "WAVLM_LARGE" else 768
         channel_dims = [feature_dim] + list(postnet_dims) + [output_dim]
@@ -146,16 +144,14 @@ class SpeakerAdapter(nn.Module):
         # Extract SSL features
         with torch.no_grad():
             features, _ = self.feature_extractor.extract_features(
-                prompts, num_layers=self.num_layers
+                prompts, num_layers=self.layer_index
             )
 
-        # Weighted sum of layer features
-        stacked = torch.stack(features, dim=1).transpose(2, 3)
-        weights = F.softmax(self.layer_weights, dim=0)
-        features = torch.einsum("bldt,l->bdt", stacked, weights)
+        # Select specific layer
+        features = features[-1].transpose(1, 2)
+        ratio = prompts.size(1) / features.size(2)
 
         # Compute feature lengths
-        ratio = prompts.size(1) / features.size(2)
         lengths = torch.ceil(prompt_lengths / ratio).long()
         lengths = torch.clamp(lengths, max=features.size(2))
 
