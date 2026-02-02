@@ -15,7 +15,7 @@
 """Audio processing modules for extracting spectrograms and reconstructing waveforms"""
 
 import random
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,31 +24,79 @@ from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 
-class SpectrogramProcessor(nn.Module):
-    """STFT-based spectrogram processor with 3-stream input.
+class _FeedForwardNetwork(nn.Module):
+    """Feedforward network with residual connections.
 
-    Extracts log-magnitude, normalized real, and normalized imaginary components
-    from audio waveforms. Real and imaginary are normalized to the unit circle,
-    providing a smooth representation of phase without wrap-around discontinuities.
+    Args:
+        feature_dim (int): Input and output feature dimension.
+        num_blocks (int, optional): Number of blocks. Defaults to 1.
+        dropout (float, optional): Dropout rate. Defaults to 0.1.
+    """
+
+    def __init__(self, feature_dim: int, num_blocks: int = 1, dropout: float = 0.1):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, 2 * feature_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(2 * feature_dim, feature_dim),
+                    nn.Dropout(dropout),
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply feedforward transformations with residual connections.
+
+        Args:
+            x (Tensor): Input tensor of shape (B, T, C) where B is batch size,
+                T is sequence length, and C is channel dimension.
+
+        Returns:
+            Tensor: Output tensor of shape (B, T, C).
+        """
+        for block in self.blocks:
+            x = x + block(x)
+        return x
+
+
+class SpectrogramProcessor(nn.Module):
+    """STFT-based spectrogram processor with magnitude and phase streams.
 
     Args:
         frame_stacking (int): Number of frames to stack for downsampling.
         window_length (int): Window length for STFT (n_fft).
         hop_length (int): Hop length for STFT.
-        output_dim (int): Output dimension after linear projection.
+        output_dim (int): Output dimension after final projection.
+        mag_dim (int, optional): Magnitude stream dimension. Defaults to 512.
+        phase_dim (int, optional): Phase stream dimension. Defaults to 256.
+        phase_grad_dim (int, optional): Phase gradient stream dimension. Defaults to 256.
+        num_ffn_blocks (int, optional): Number of feedforward blocks per stream. Defaults to 2.
     """
 
     def __init__(
-        self, frame_stacking: int, window_length: int, hop_length: int, output_dim: int
+        self,
+        frame_stacking: int,
+        window_length: int,
+        hop_length: int,
+        output_dim: int,
+        mag_dim: int = 512,
+        phase_dim: int = 256,
+        phase_grad_dim: int = 256,
+        num_ffn_blocks: int = 2,
     ):
         super().__init__()
 
         self.frame_stacking = frame_stacking
         self.window_length = window_length
         self.hop_length = hop_length
-
-        n_bins = window_length // 2 + 1
-        stacked_dim = 3 * n_bins * frame_stacking
+        self.mag_dim = mag_dim
+        self.phase_dim = phase_dim
+        self.phase_grad_dim = phase_grad_dim
 
         self.specgram = TAudio.Spectrogram(
             n_fft=window_length,
@@ -57,104 +105,149 @@ class SpectrogramProcessor(nn.Module):
             power=None,
         )
 
-        self.projector = nn.Linear(stacked_dim, output_dim)
-        nn.init.xavier_uniform_(self.projector.weight)
-        nn.init.zeros_(self.projector.bias)
+        n_bins = window_length // 2 + 1
+        stacked_bins = n_bins * frame_stacking
+
+        # Separate embeddings for each stream
+        self.mag_embed = nn.Linear(stacked_bins, mag_dim)
+        self.phase_embed = nn.Linear(stacked_bins, phase_dim)
+        self.phase_grad_embed = nn.Linear(stacked_bins, phase_grad_dim)
+
+        # Feedforward networks with residual connections
+        self.mag_ffn = _FeedForwardNetwork(mag_dim, num_ffn_blocks)
+        self.phase_ffn = _FeedForwardNetwork(phase_dim, num_ffn_blocks)
+        self.phase_grad_ffn = _FeedForwardNetwork(phase_grad_dim, num_ffn_blocks)
+
+        # Final projection to output dimension
+        total_dim = mag_dim + phase_dim + phase_grad_dim
+        self.projector = nn.Linear(total_dim, output_dim)
+
+    def _compute_phase_gradient(self, phase: torch.Tensor) -> torch.Tensor:
+        """Compute temporal gradient of phase with 2π discontinuity correction.
+
+        Calculates the rate of phase change over time, removing artificial jumps
+        caused by phase wrapping. This provides explicit phase velocity information
+        that helps the network model phase dynamics more effectively.
+
+        Args:
+            phase (Tensor): Phase in [-π, π] with shape (B, T, n_bins).
+
+        Returns:
+            Tensor: Phase temporal gradient (B, T, n_bins).
+        """
+        # Compute phase difference between consecutive frames
+        phase_diff = torch.diff(phase, dim=1)
+
+        # Wrap differences to [-π, π] to remove 2π jumps
+        phase_diff_wrapped = torch.angle(torch.exp(1j * phase_diff))
+
+        # Prepend zero for first frame (no gradient at t=0)
+        gradient = torch.cat(
+            [torch.zeros_like(phase[:, :1, :]), phase_diff_wrapped], dim=1
+        )
+
+        return gradient
 
     def forward(
-        self, waveforms: torch.Tensor, lengths: torch.Tensor, return_phase: bool = False
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor],
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ]:
-        """Forward pass of the spectrogram processor.
+        self, waveforms: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass extracting magnitude and phase gradient features.
 
         Args:
             waveforms (Tensor): Input tensor with shape (B, T, 1).
             lengths (Tensor): Audio sample lengths with shape (B,).
-            return_phase (bool): If True, also return phase tensor for truth phase reconstruction.
 
         Returns:
             Tensor: Output features with shape (B, T // (hop_length * frame_stacking), D).
             Tensor: Feature sequence lengths with shape (B,).
-            Tensor (optional): Phase tensor with shape (B, T', n_bins) if return_phase=True.
         """
         if waveforms.size(2) != 1:
             raise ValueError("The audio signal should be mono-channel.")
 
         # Extract complex spectrograms: (B, n_bins, T') -> (B, T', n_bins)
         specs = self.specgram(waveforms.squeeze(2)).transpose(1, 2)
+        batch_size, num_frames, n_bins = specs.shape
 
-        # Extract log-magnitude
-        mag = specs.abs().clamp(min=1e-9)
-        log_mag = mag.log()
+        # Stream 1: Log-magnitude
+        log_mag = torch.log(torch.clamp(specs.abs(), min=1e-5))
 
-        # Extract normalized real and imaginary
-        real = specs.real / mag
-        imag = specs.imag / mag
+        # Stream 2: Raw phase (wrapped)
+        phase = specs.angle()
 
-        # Compute phase for optional return (before stacking)
-        phase = torch.atan2(imag, real) if return_phase else None
-
-        # Concatenate all three streams: (B, T', 3 * n_bins)
-        features = torch.cat((log_mag, real, imag), dim=2)
-        batch_size, num_frames, _ = features.shape
+        # Stream 3: Unwrapped phase temporal gradient
+        phase_grad = self._compute_phase_gradient(phase)
 
         # Pad to make divisible by frame_stacking
         remainder = num_frames % self.frame_stacking
         if remainder != 0:
             pad_frames = self.frame_stacking - remainder
-            features = F.pad(features, (0, 0, 0, pad_frames))
-            if phase is not None:
-                phase = F.pad(phase, (0, 0, 0, pad_frames))
+            log_mag = F.pad(log_mag, (0, 0, 0, pad_frames))
+            phase = F.pad(phase, (0, 0, 0, pad_frames))
+            phase_grad = F.pad(phase_grad, (0, 0, 0, pad_frames))
 
-        # Reshape to stack frames: (B, T' // stack, stack * 3 * n_bins)
-        stacked_frames = features.size(1) // self.frame_stacking
-        features = features.reshape(batch_size, stacked_frames, -1)
+        # Stack frames for each stream: (B, T' // stack, stack * n_bins)
+        stacked_frames = log_mag.size(1) // self.frame_stacking
+        log_mag_stacked = log_mag.reshape(
+            batch_size, stacked_frames, self.frame_stacking * n_bins
+        )
+        phase_stacked = phase.reshape(
+            batch_size, stacked_frames, self.frame_stacking * n_bins
+        )
+        phase_grad_stacked = phase_grad.reshape(
+            batch_size, stacked_frames, self.frame_stacking * n_bins
+        )
 
-        # Stack phase frames as well if returning: (B, T' // stack, stack * n_bins)
-        if phase is not None:
-            n_bins = self.window_length // 2 + 1
-            phase = phase.reshape(
-                batch_size, stacked_frames, self.frame_stacking * n_bins
-            )
+        # Embed each stream to its target dimension
+        mag_features = self.mag_embed(log_mag_stacked)
+        phase_features = self.phase_embed(phase_stacked)
+        phase_grad_features = self.phase_grad_embed(phase_grad_stacked)
 
-        # Calculate output lengths (spectrogram frames / frame_stacking)
-        spec_lengths = torch.floor(lengths / self.hop_length) + 1
-        output_lengths = torch.ceil(spec_lengths / self.frame_stacking)
+        # Process each stream through feedforward networks
+        mag_features = self.mag_ffn(mag_features)
+        phase_features = self.phase_ffn(phase_features)
+        phase_grad_features = self.phase_grad_ffn(phase_grad_features)
 
-        # Apply linear projection to desired output dimension
+        # Apply final projection to desired output dimension
+        features = torch.cat((mag_features, phase_features, phase_grad_features), dim=2)
         features = self.projector(features)
 
-        if return_phase:
-            return features, output_lengths.to(dtype=lengths.dtype), phase
-        return features, output_lengths.to(dtype=lengths.dtype)
+        # Calculate per-sample output lengths matching actual STFT output
+        spec_lengths = 1 + lengths.div(self.hop_length, rounding_mode="floor")
+        output_lengths = torch.ceil(spec_lengths / self.frame_stacking)
+
+        return features, output_lengths.to(lengths.dtype)
 
 
 class InverseSpectrogramProcessor(nn.Module):
     """iSTFT-based inverse processor for waveform reconstruction.
 
-    Predicts magnitude, real, and imaginary components, then computes phase
-    via arctan2(imag, real) to avoid phase wrapping discontinuities at ±π.
-
     Args:
         frame_stacking (int): Number of frames to unstack for upsampling.
         window_length (int): Window length for iSTFT (n_fft).
         hop_length (int): Hop length for iSTFT.
-        input_dim (int): Input dimension before linear projection.
+        input_dim (int): Input feature dimension.
+        mag_dim (int, optional): Magnitude branch dimension. Defaults to 512.
+        phase_dim (int, optional): Phase branch dimension. Defaults to 512.
+        num_ffn_blocks (int, optional): Number of feedforward blocks per branch. Defaults to 2.
     """
 
     def __init__(
-        self, frame_stacking: int, window_length: int, hop_length: int, input_dim: int
+        self,
+        frame_stacking: int,
+        window_length: int,
+        hop_length: int,
+        input_dim: int,
+        mag_dim: int = 512,
+        phase_dim: int = 512,
+        num_ffn_blocks: int = 2,
     ):
         super().__init__()
 
         self.frame_stacking = frame_stacking
         self.window_length = window_length
         self.hop_length = hop_length
-
-        n_bins = window_length // 2 + 1
-        stacked_dim = 3 * n_bins * frame_stacking
+        self.mag_dim = mag_dim
+        self.phase_dim = phase_dim
 
         self.inverse_specgram = TAudio.InverseSpectrogram(
             n_fft=window_length,
@@ -162,25 +255,31 @@ class InverseSpectrogramProcessor(nn.Module):
             hop_length=hop_length,
         )
 
-        self.projector = nn.Linear(input_dim, stacked_dim)
-        nn.init.xavier_uniform_(self.projector.weight)
-        nn.init.zeros_(self.projector.bias)
+        n_bins = window_length // 2 + 1
+        stacked_bins = n_bins * frame_stacking
+
+        # Magnitude branch: predicts log-magnitude
+        self.mag_proj_in = nn.Linear(input_dim, mag_dim)
+        self.mag_ffn = _FeedForwardNetwork(mag_dim, num_ffn_blocks)
+        self.mag_proj_out = nn.Linear(mag_dim, stacked_bins)
+
+        # Phase branch: predicts real and imaginary components
+        self.phase_proj_in = nn.Linear(input_dim, phase_dim)
+        self.phase_ffn = _FeedForwardNetwork(phase_dim, num_ffn_blocks)
+        self.phase_proj_out = nn.Linear(phase_dim, 2 * stacked_bins)
 
     def forward(
         self,
         features: torch.Tensor,
         lengths: torch.Tensor,
         max_output_length: Optional[int] = None,
-        truth_phase: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of the inverse spectrogram processor.
+        """Reconstruct waveform from decoder features via inverse STFT.
 
         Args:
             features: Input tensor with shape (B, T, D).
             lengths: Feature sequence lengths with shape (B,).
             max_output_length: Maximum output audio length for exact reconstruction.
-            truth_phase: Optional ground truth phase tensor with shape (B, T, stack * n_bins).
-                If provided, uses this instead of reconstructing phase from features.
 
         Returns:
             Tensor: Output waveform tensor with shape (B, max_output_length or inferred, 1).
@@ -189,31 +288,26 @@ class InverseSpectrogramProcessor(nn.Module):
         batch_size, stacked_frames, _ = features.shape
         n_bins = self.window_length // 2 + 1
 
-        # Project to output dimension: (B, T, D) -> (B, T, 3 * n_bins * frame_stacking)
-        features = self.projector(features)
+        # Magnitude branch: proj_in → FFN → proj_out
+        mag_hidden = self.mag_proj_in(features)
+        mag_hidden = self.mag_ffn(mag_hidden)
+        log_mag = self.mag_proj_out(mag_hidden)
 
-        # Unstack frames: (B, T, stack * 3 * n_bins) -> (B, T * stack, 3 * n_bins)
-        features = features.reshape(
-            batch_size, stacked_frames * self.frame_stacking, 3 * n_bins
-        )
+        # Phase branch: proj_in → FFN → proj_out (predicts real and imaginary)
+        phase_hidden = self.phase_proj_in(features)
+        phase_hidden = self.phase_ffn(phase_hidden)
+        phase_output = self.phase_proj_out(phase_hidden)
+        real, imag = phase_output.chunk(2, dim=2)
 
-        # Split into magnitude, real, and imaginary components
-        log_mag, real, imag = features.chunk(3, dim=2)
+        # Unstack frames: (B, T, stacked_bins) -> (B, T * stack, n_bins)
+        unstacked_frames = stacked_frames * self.frame_stacking
+        log_mag = log_mag.reshape(batch_size, unstacked_frames, n_bins)
+        real = real.reshape(batch_size, unstacked_frames, n_bins)
+        imag = imag.reshape(batch_size, unstacked_frames, n_bins)
 
-        # Compute magnitude
-        magnitude = log_mag.exp()
-
-        # Use truth phase if provided, otherwise reconstruct from features
-        if truth_phase is not None:
-            # Unstack truth phase: (B, T, stack * n_bins) -> (B, T * stack, n_bins)
-            phase = truth_phase.reshape(
-                batch_size, stacked_frames * self.frame_stacking, n_bins
-            )
-        else:
-            phase = torch.atan2(imag, real)
-
-        # Construct complex spectrogram: A * exp(j*ϕ)
-        specs = torch.polar(magnitude.float(), phase.float())
+        # Build complex spectrogram from magnitude and phase
+        mag, phase = log_mag.exp(), torch.atan2(imag, real)
+        specs = torch.complex(mag * phase.cos(), mag * phase.sin())
 
         # Convert to waveform via inverse STFT: (B, n_bins, T') -> (B, T_audio)
         waveforms = self.inverse_specgram(
@@ -222,7 +316,7 @@ class InverseSpectrogramProcessor(nn.Module):
 
         # Calculate output lengths: unstacked_frames -> audio samples
         spec_lengths = lengths * self.frame_stacking
-        output_lengths = (spec_lengths - 1) * self.hop_length
+        output_lengths = (spec_lengths - 1) * self.hop_length + self.window_length
 
         # Clamp to actual waveform size if max_output_length is provided
         if max_output_length is not None:
