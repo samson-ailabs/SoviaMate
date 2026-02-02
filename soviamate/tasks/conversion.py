@@ -22,6 +22,7 @@ import lightning as L
 import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 from torch.utils.data import DataLoader
 
 from soviamate.modules.discriminator import SEGMENT_SIZE
@@ -56,13 +57,13 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.splice_out = None
 
-        # ASR decoder for auxiliary training
+        # Text decoder for auxiliary training
         if hasattr(model, "text_decoder"):
             self.text_decoder = instantiate(model.text_decoder)
         else:
             self.text_decoder = None
 
-        # ASR loss for auxiliary training
+        # Text loss for auxiliary training
         if hasattr(model, "text_loss"):
             self.text_loss = instantiate(model.text_loss)
         else:
@@ -74,7 +75,7 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.speaker_adapter = None
 
-        # Speaker contrastive loss for content disentanglement
+        # Speaker contrastive loss for speaker disentanglement
         if hasattr(model, "speaker_loss"):
             self.speaker_loss = instantiate(model.speaker_loss)
         else:
@@ -115,34 +116,23 @@ class AudioCodecTask(L.LightningModule):
         target_audios: torch.Tensor,
         target_lengths: torch.Tensor,
         apply_splice_out: bool = False,
-    ) -> Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
-        # Encode source and target in one shot for better GPU utilization
+    ) -> Tuple[torch.Tensor | None, ...]:
+        # Encode source (augmented) and optionally target (clean) audios
         if self.speaker_loss is not None:
-            # Batch encode: concatenate source and target
-            combined_audios = torch.cat([source_audios, target_audios], dim=0)
-            combined_lengths = torch.cat([source_lengths, target_lengths], dim=0)
+            merged_audios = torch.cat([source_audios, target_audios], dim=0)
+            merged_lengths = torch.cat([source_lengths, target_lengths], dim=0)
 
-            # Single forward pass (batch size = 2B)
-            combined_features, combined_feature_lengths = self.audio_encoder(
-                combined_audios, combined_lengths
+            merged_features, merged_lengths = self.audio_encoder(
+                merged_audios, merged_lengths
             )
 
-            # Split back into source and target
-            source_features, target_features = torch.chunk(combined_features, 2, dim=0)
+            source_features, target_features = torch.chunk(
+                merged_features, chunks=2, dim=0
+            )
             source_feature_lengths, target_feature_lengths = torch.chunk(
-                combined_feature_lengths, 2, dim=0
+                merged_lengths, chunks=2, dim=0
             )
         else:
-            # Only encode source (no target for contrastive learning)
             source_features, source_feature_lengths = self.audio_encoder(
                 source_audios, source_lengths
             )
@@ -151,13 +141,30 @@ class AudioCodecTask(L.LightningModule):
         # Text recognition branch (optional)
         output_tokens, output_token_lengths = None, None
         if self.text_decoder is not None:
+            # Encode prompt through audio_encoder for text features
+            prompt_features, prompt_feature_lengths = self.audio_encoder(
+                prompt_audios, prompt_lengths
+            )
+
+            # Concatenate prompt + source features using unpad/pad
+            prompt_list = unpad_sequence(
+                prompt_features, prompt_feature_lengths, batch_first=True
+            )
+            source_list = unpad_sequence(
+                source_features, source_feature_lengths, batch_first=True
+            )
+
+            asr_list = [
+                torch.cat([p, s], dim=0) for p, s in zip(prompt_list, source_list)
+            ]
+            asr_features = pad_sequence(asr_list, batch_first=True)
+            asr_feature_lengths = prompt_feature_lengths + source_feature_lengths
+
+            # Apply splice_out augmentation if enabled
             if apply_splice_out and self.splice_out is not None:
                 asr_features, asr_feature_lengths = self.splice_out(
-                    source_features, source_feature_lengths
+                    asr_features, asr_feature_lengths
                 )
-            else:
-                asr_features = source_features
-                asr_feature_lengths = source_feature_lengths
 
             output_tokens, output_token_lengths = self.text_decoder(
                 asr_features, asr_feature_lengths
@@ -188,14 +195,14 @@ class AudioCodecTask(L.LightningModule):
         )
 
         return (
-            output_audios,
-            output_audio_lengths,
-            output_tokens,
-            output_token_lengths,
             source_features,
             source_feature_lengths,
             target_features,
             target_feature_lengths,
+            output_audios,
+            output_audio_lengths,
+            output_tokens,
+            output_token_lengths,
         )
 
     def training_step(self, batch: Tuple[torch.Tensor, ...], batch_idx: int):
@@ -211,14 +218,14 @@ class AudioCodecTask(L.LightningModule):
         ) = batch
 
         (
-            output_audios,
-            _,
-            output_tokens,
-            output_token_lengths,
             source_features,
             source_feature_lengths,
             target_features,
             target_feature_lengths,
+            output_audios,
+            _,
+            output_tokens,
+            output_token_lengths,
         ) = self.forward(
             source_audios,
             source_lengths,
@@ -277,7 +284,7 @@ class AudioCodecTask(L.LightningModule):
             )
 
         speaker_loss = 0.0
-        if target_features is not None and self.speaker_loss is not None:
+        if self.speaker_loss is not None:
             speaker_loss = self.speaker_loss(
                 source_features,
                 target_features,
@@ -286,7 +293,7 @@ class AudioCodecTask(L.LightningModule):
             )
 
         train_loss = (
-            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.3 * speaker_loss
+            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.5 * speaker_loss
         )
         self.manual_backward(train_loss)
 
@@ -296,10 +303,11 @@ class AudioCodecTask(L.LightningModule):
 
         self.untoggle_optimizer(gen_optim)
 
-        log_dict = {"train_audio_loss": audio_loss, "train_gen_loss": gen_loss}
-
-        if "disc_loss" in locals():
-            log_dict["train_disc_loss"] = disc_loss
+        log_dict = {
+            "train_audio_loss": audio_loss,
+            "train_disc_loss": disc_loss,
+            "train_gen_loss": gen_loss,
+        }
 
         if text_loss > 0 and self.text_loss is not None:
             log_dict["train_text_loss"] = text_loss
@@ -323,14 +331,14 @@ class AudioCodecTask(L.LightningModule):
         ) = batch
 
         (
-            output_audios,
-            _,
-            output_tokens,
-            output_token_lengths,
             source_features,
             source_feature_lengths,
             target_features,
             target_feature_lengths,
+            output_audios,
+            _,
+            output_tokens,
+            output_token_lengths,
         ) = self.forward(
             source_audios,
             source_lengths,
@@ -363,7 +371,7 @@ class AudioCodecTask(L.LightningModule):
             )
 
         speaker_loss = 0.0
-        if target_features is not None and self.speaker_loss is not None:
+        if self.speaker_loss is not None:
             speaker_loss = self.speaker_loss(
                 source_features,
                 target_features,
@@ -372,7 +380,7 @@ class AudioCodecTask(L.LightningModule):
             )
 
         val_loss = (
-            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.3 * speaker_loss
+            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.5 * speaker_loss
         )
 
         log_dict = {"val_audio_loss": audio_loss, "val_gen_loss": gen_loss}
@@ -430,8 +438,7 @@ class AudioCodecTask(L.LightningModule):
             params=self.discriminator.parameters(),
         )
         disc_sched = instantiate(
-            self.hparams.optim.discriminator.scheduler,
-            optimizer=disc_optim,
+            self.hparams.optim.discriminator.scheduler, optimizer=disc_optim
         )
 
         gen_param_groups = [
@@ -440,23 +447,26 @@ class AudioCodecTask(L.LightningModule):
             self.audio_decoder.parameters(),
         ]
 
-        # Add ASR parameters if available
+        # Add text decoder parameters if available
         if self.text_decoder is not None:
             gen_param_groups.append(self.text_decoder.parameters())
+
+        if self.text_loss is not None:
+            gen_param_groups.append(self.text_loss.parameters())
 
         # Add speaker adaptation parameters if available
         if self.speaker_adapter is not None:
             gen_param_groups.append(self.speaker_adapter.parameters())
 
+        if self.speaker_loss is not None:
+            gen_param_groups.append(self.speaker_loss.parameters())
+
         gen_optim = instantiate(
             self.hparams.optim.generator.optimizer,
             params=itertools.chain(*gen_param_groups),
         )
-
-        # Same handling for generator scheduler
         gen_sched = instantiate(
-            self.hparams.optim.generator.scheduler,
-            optimizer=gen_optim,
+            self.hparams.optim.generator.scheduler, optimizer=gen_optim
         )
 
         return [disc_optim, gen_optim], [

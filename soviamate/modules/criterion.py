@@ -172,192 +172,109 @@ class SequenceToSequenceLoss(nn.Module):
         return loss
 
 
-class InformationContrastiveLoss(nn.Module):
-    """Information Noise-Contrastive Estimation loss for representation learning.
-
-    Implements the InfoNCE objective for learning robust representations via
-    contrastive learning. Maximizes agreement between positive pairs while
-    pushing apart negative samples in the batch.
-
-    Args:
-        embed_dim (int): Input embedding dimension.
-        temperature (float): Temperature parameter for scaling logits.
-        projection_dim (int): Projection head output dimension. If None, same as embed_dim.
-        projection_hidden_dim (int): Projection head hidden dimension. If None, 2x embed_dim.
-    """
-
-    def __init__(
-        self,
-        embed_dim: int,
-        temperature: float = 0.1,
-        projection_dim: int | None = None,
-        projection_hidden_dim: int | None = None,
-    ):
-        super().__init__()
-        self.temperature = temperature
-
-        proj_dim = projection_dim or embed_dim
-        hidden_dim = projection_hidden_dim or embed_dim * 2
-
-        self.projector = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, proj_dim),
-        )
-
-    def forward(
-        self,
-        source_embeddings: torch.Tensor,
-        target_embeddings: torch.Tensor,
-        source_lengths: torch.Tensor | None = None,
-        target_lengths: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Compute contrastive loss for paired embeddings.
-
-        Args:
-            source_embeddings (Tensor): First set of embeddings of shape `(B, T, D)`.
-            target_embeddings (Tensor): Second set of embeddings of shape `(B, T, D)`.
-            source_lengths (Tensor, optional): Valid lengths of source `(B,)`.
-            target_lengths (Tensor, optional): Valid lengths of target `(B,)`.
-
-        Returns:
-            Tensor: Contrastive loss value (scalar).
-        """
-        # Pool source embeddings over time dimension
-        if source_lengths is not None:
-            masks = make_padding_mask(source_lengths)
-            masks = (~masks).float().unsqueeze(-1)
-            source_pooled = (source_embeddings * masks).sum(dim=1) / masks.sum(dim=1)
-        else:
-            source_pooled = source_embeddings.mean(dim=1)
-
-        # Pool target embeddings over time dimension
-        if target_lengths is not None:
-            masks = make_padding_mask(target_lengths)
-            masks = (~masks).float().unsqueeze(-1)
-            target_pooled = (target_embeddings * masks).sum(dim=1) / masks.sum(dim=1)
-        else:
-            target_pooled = target_embeddings.mean(dim=1)
-
-        # Apply projection head after pooling
-        source_pooled = self.projector(source_pooled)
-        target_pooled = self.projector(target_pooled)
-
-        # Normalize embeddings to unit sphere
-        source_pooled = F.normalize(source_pooled, p=2, dim=1)
-        target_pooled = F.normalize(target_pooled, p=2, dim=1)
-
-        # Compute cosine similarity (B x B)
-        similarity = torch.mm(source_pooled, target_pooled.T) / self.temperature
-
-        # Labels: src[i] matches tgt[i]
-        labels = torch.arange(source_pooled.size(0), device=source_pooled.device)
-
-        # Compute loss in both directions and average
-        loss_s2t = F.cross_entropy(similarity, labels)
-        loss_t2s = F.cross_entropy(similarity.T, labels)
-
-        return (loss_s2t + loss_t2s) / 2
-
-
 class SequenceContrastiveLoss(nn.Module):
-    """Contrastive loss for learning invariant sequence representations.
+    """VICReg-based contrastive loss for learning invariant sequence representations.
 
-    Implements VICReg (Bardes et al., 2022) adapted for sequential data.
-    Unlike InfoNCE, VICReg avoids representation collapse without requiring
-    negative samples by combining three complementary objectives:
-
-    - **Invariance**: Aligns representations of paired source/target frames
-    - **Variance**: Prevents collapse by maintaining per-dimension variance
-    - **Covariance**: Encourages diverse features by decorrelating dimensions
-
-    Samples frames randomly across batch for efficient statistics computation,
-    using the same indices for source and target to preserve alignment.
+    Combines three objectives to learn robust representations without negative samples:
+    - Invariance: Align representations of paired sequences
+    - Variance: Maintain per-dimension variance to prevent collapse
+    - Covariance: Decorrelate dimensions for diverse features
 
     Args:
-        num_samples (int): Number of frames to sample across batch for statistics.
-        lambda_inv (float): Weight for invariance term (alignment strength).
-        lambda_var (float): Weight for variance term (prevents collapse).
-        lambda_cov (float): Weight for covariance term (feature decorrelation).
-        variance_gamma (float): Minimum variance threshold for hinge loss.
-        variance_epsilon (float): Numerical stability for variance computation.
+        input_dim (int): Input feature dimension.
+        projector_dim (int): Projector MLP hidden and output dimension.
+        lambda_inv (float): Invariance loss weight.
+        lambda_var (float): Variance loss weight.
+        lambda_cov (float): Covariance loss weight.
+        variance_gamma (float): Minimum std threshold for variance hinge loss.
+        variance_epsilon (float): Numerical stability constant for variance.
     """
 
     def __init__(
         self,
-        num_samples: int = 1024,
-        lambda_inv: float = 5.0,
-        lambda_var: float = 1.0,
+        input_dim: int,
+        projector_dim: int = 4096,
+        lambda_inv: float = 25.0,
+        lambda_var: float = 25.0,
         lambda_cov: float = 1.0,
         variance_gamma: float = 1.0,
         variance_epsilon: float = 1e-4,
     ):
         super().__init__()
 
-        self.num_samples = num_samples
         self.lambda_inv = lambda_inv
         self.lambda_var = lambda_var
         self.lambda_cov = lambda_cov
         self.variance_gamma = variance_gamma
         self.variance_epsilon = variance_epsilon
 
-    def invariance_loss(self, z_a: torch.Tensor, z_b: torch.Tensor) -> torch.Tensor:
-        """Compute invariance loss: MSE between aligned frame pairs.
+        self.projector = nn.Sequential(
+            nn.Conv1d(input_dim, projector_dim, kernel_size=1),
+            nn.InstanceNorm1d(projector_dim, affine=True),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(projector_dim, projector_dim, kernel_size=1),
+            nn.InstanceNorm1d(projector_dim, affine=True),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(projector_dim, projector_dim, kernel_size=1),
+        )
+
+    def invariance_loss(
+        self, z_a: torch.Tensor, z_b: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute invariance loss between paired sequences.
 
         Args:
-            z_a: First view embeddings of shape `(N, D)`.
-            z_b: Second view embeddings of shape `(N, D)`.
+            z_a (Tensor): First sequence embeddings of shape (B, T, D).
+            z_b (Tensor): Second sequence embeddings of shape (B, T, D).
+            mask (Tensor): Valid frame mask of shape (B, T).
 
         Returns:
-            Scalar MSE loss.
+            Tensor: Masked MSE loss averaged across batch.
         """
-        return F.mse_loss(z_a, z_b, reduction="mean")
+        diff = F.mse_loss(z_a, z_b, reduction="none")
+        masked_diff = diff * mask.unsqueeze(-1)
 
-    def variance_loss(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute variance loss: hinge loss on per-dimension standard deviation.
+        num_valid = mask.unsqueeze(-1).expand_as(diff).sum(dim=(1, 2))
+        inv_loss = (masked_diff.sum(dim=(1, 2)) / num_valid).mean()
 
-        Prevents representation collapse by enforcing a minimum variance threshold
-        for each dimension. Only penalizes dimensions with std below gamma.
+        return inv_loss
+
+    def variance_covariance_loss(
+        self, z: torch.Tensor, mask: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute variance and covariance losses per utterance.
 
         Args:
-            z: Embeddings of shape `(N, D)`.
+            z (Tensor): Embeddings of shape (B, T, D).
+            mask (Tensor): Valid frame mask of shape (B, T).
+            lengths (Tensor): Valid frame counts of shape (B,).
 
         Returns:
-            Scalar variance loss.
+            Tensor: Variance loss (scalar).
+            Tensor: Covariance loss (scalar).
         """
-        # Compute std per dimension (across num_samples)
-        std = torch.sqrt(z.var(dim=0) + self.variance_epsilon)
+        mask = mask.unsqueeze(-1)
+        lengths = lengths.unsqueeze(1) - 1
 
-        # Hinge loss: penalize only if std < gamma
-        loss = torch.relu(self.variance_gamma - std).mean()
+        # Center per utterance
+        mean = (z * mask).sum(dim=1) / lengths
+        centered = z - mean.unsqueeze(1)
+        masked_centered = centered * mask
 
-        return loss
+        # Variance: hinge loss on std per dimension
+        var = (centered.pow(2) * mask).sum(dim=1) / (lengths - 1).clamp(min=1.0)
+        std = torch.sqrt(var + self.variance_epsilon)
+        loss_var = torch.relu(self.variance_gamma - std).mean()
 
-    def covariance_loss(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute covariance loss: penalize off-diagonal covariance elements.
+        # Covariance: penalize off-diagonal correlations
+        cov = torch.einsum("btd,bte->bde", masked_centered, masked_centered)
+        cov = cov / (lengths.view(-1, 1, 1) - 1).clamp(min=1.0)
 
-        Encourages decorrelated features by minimizing correlations between
-        different dimensions, promoting diverse and non-redundant representations.
+        diag_sum = cov.diagonal(dim1=1, dim2=2).pow(2).sum(dim=1)
+        total_sum = cov.pow(2).sum(dim=(1, 2))
+        loss_cov = ((total_sum - diag_sum) / z.size(2)).mean()
 
-        Args:
-            z: Embeddings of shape `(N, D)`.
-
-        Returns:
-            Scalar covariance loss.
-        """
-        num_samples, dim = z.shape
-
-        # Center embeddings
-        z_centered = z - z.mean(dim=0, keepdim=True)
-
-        # Covariance matrix: C = (1/(n-1)) * Z^T @ Z
-        cov = (z_centered.T @ z_centered) / (num_samples - 1)
-
-        # Penalize off-diagonal elements only
-        off_diagonal = cov.pow(2).sum() - cov.diag().pow(2).sum()
-        loss = off_diagonal / dim
-
-        return loss
+        return loss_var, loss_cov
 
     def forward(
         self,
@@ -365,80 +282,43 @@ class SequenceContrastiveLoss(nn.Module):
         target_embeddings: torch.Tensor,
         source_lengths: torch.Tensor,
         target_lengths: torch.Tensor,
-        return_components: bool = False,
-    ) -> torch.Tensor | dict:
-        """Compute contrastive loss with cross-batch frame sampling.
-
-        Samples frames randomly across the batch while using the same indices
-        for both source and target to preserve temporal alignment.
+    ) -> torch.Tensor:
+        """Compute VICReg loss for paired sequences.
 
         Args:
-            source_embeddings (Tensor): Source frames of shape `(B, T, D)`.
-            target_embeddings (Tensor): Target frames of shape `(B, T, D)`.
-            source_lengths (Tensor): Valid frame counts of shape `(B,)`.
-            target_lengths (Tensor): Valid frame counts of shape `(B,)`.
-            return_components (bool): If True, return dict with loss components.
+            source_embeddings (Tensor): First sequence of shape (B, T, D).
+            target_embeddings (Tensor): Second sequence of shape (B, T, D).
+            source_lengths (Tensor): Valid frame counts for source of shape (B,).
+            target_lengths (Tensor): Valid frame counts for target of shape (B,).
 
         Returns:
-            Scalar loss or dict with individual loss components for logging.
+            Tensor: Weighted sum of invariance, variance, and covariance losses.
         """
-        assert source_lengths.equal(target_lengths), (
-            "Source and target lengths must be equal for aligned frames."
-        )
+        assert source_lengths.equal(target_lengths), "Lengths must match"
+        batch_size = source_embeddings.size(0)
 
-        embed_dim = source_embeddings.shape[-1]
-        device = source_embeddings.device
+        # Project both views through shared MLP
+        stacked = torch.cat([source_embeddings, target_embeddings], dim=0)
+        proj = self.projector(stacked.transpose(1, 2)).transpose(1, 2)
 
-        # Create mask for valid frames (source and target have same length)
-        mask = make_padding_mask(source_lengths)
-        valid_mask = (~mask).reshape(-1)  # (B x T)
+        # Split back into source and target
+        src_proj, tgt_proj = proj[:batch_size], proj[batch_size:]
 
-        # Flatten to (B*T, D) and extract valid frames
-        src_flat = source_embeddings.reshape(-1, embed_dim)
-        tgt_flat = target_embeddings.reshape(-1, embed_dim)
+        # Compute mask from lengths
+        mask = ~make_padding_mask(source_lengths)
 
-        src_valid = src_flat[valid_mask]
-        tgt_valid = tgt_flat[valid_mask]
+        # Invariance: pull corresponding frames together
+        loss_inv = self.invariance_loss(src_proj, tgt_proj, mask)
 
-        # Random sampling (same indices for source and target alignment)
-        num_valid = src_valid.shape[0]
+        # Variance & covariance: average over both views
+        var_src, cov_src = self.variance_covariance_loss(src_proj, mask, source_lengths)
+        var_tgt, cov_tgt = self.variance_covariance_loss(tgt_proj, mask, target_lengths)
 
-        if num_valid <= self.num_samples:
-            src_sampled = src_valid
-            tgt_sampled = tgt_valid
-        else:
-            # Sample same random indices from both
-            indices = torch.randperm(num_valid, device=device)
-            indices = indices[: self.num_samples]
+        loss_var = (var_src + var_tgt) / 2
+        loss_cov = (cov_src + cov_tgt) / 2
 
-            src_sampled = src_valid[indices]
-            tgt_sampled = tgt_valid[indices]
-
-        # Compute loss components
-        loss_inv = self.invariance_loss(src_sampled, tgt_sampled)
-
-        # Variance and covariance computed on both views and averaged
-        loss_var_src = self.variance_loss(src_sampled)
-        loss_var_tgt = self.variance_loss(tgt_sampled)
-        loss_var = (loss_var_src + loss_var_tgt) / 2
-
-        loss_cov_src = self.covariance_loss(src_sampled)
-        loss_cov_tgt = self.covariance_loss(tgt_sampled)
-        loss_cov = (loss_cov_src + loss_cov_tgt) / 2
-
-        # Combined weighted loss
-        total_loss = (
+        return (
             self.lambda_inv * loss_inv
             + self.lambda_var * loss_var
             + self.lambda_cov * loss_cov
         )
-
-        if return_components:
-            return {
-                "total_loss": total_loss,
-                "invariance": loss_inv,
-                "variance": loss_var,
-                "covariance": loss_cov,
-            }
-
-        return total_loss
