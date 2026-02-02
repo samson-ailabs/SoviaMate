@@ -14,91 +14,154 @@
 
 """Speaker feature extraction module for multi-speaker synthesis."""
 
-from typing import Literal, Optional, Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchaudio
 
+from soviamate.utils.helper import make_padding_mask
 
-class SpeakerAdapter(nn.Module):
-    """SSL-based speaker adapter using WavLM for speaker feature extraction.
+
+class SEConvBlock(nn.Module):
+    """Squeeze-Excitation convolutional block with masked channel attention.
 
     Args:
-        model_name (Literal["WAVLM_LARGE", "WAVLM_BASE"]): Pre-trained model identifier.
-        extract_layer (int): Which WavLM layer to extract features from.
-        output_dim (int): Output dimension for speaker embedding.
-        dropout (float): Dropout probability for regularization.
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        kernel_size (int): Convolution kernel size. Defaults to 3.
+        se_reduction (int): SE bottleneck reduction ratio. Defaults to 8.
     """
 
     def __init__(
         self,
-        model_name: Literal["WAVLM_LARGE", "WAVLM_BASE"],
-        extract_layer: int = 4,
-        output_dim: int = 256,
-        dropout: float = 0.1,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        se_reduction: int = 8,
+    ) -> None:
+        super().__init__()
+
+        padding = (kernel_size - 1) // 2
+
+        # Main branch
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+
+        # SE branch
+        se_channels = max(out_channels // se_reduction, 8)
+        self.se_fc1 = nn.Conv1d(out_channels, se_channels, 1)
+        self.se_fc2 = nn.Conv1d(se_channels, out_channels, 1)
+
+        # Residual projection
+        self.proj = (
+            nn.Conv1d(in_channels, out_channels, 1)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Forward pass with SE channel attention.
+
+        Args:
+            x (Tensor): Input of shape (B, C, T).
+            mask (Tensor): Mask of shape (B, 1, T), 1=valid, 0=pad.
+
+        Returns:
+            Tensor: Output of shape (B, C_out, T).
+        """
+        residual = self.proj(x)
+
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+
+        masked_sum = (out * mask).sum(dim=-1, keepdim=True)
+        valid_count = mask.sum(dim=-1, keepdim=True).clamp(min=1)
+
+        se = self.se_fc1(masked_sum / valid_count)
+        se = torch.sigmoid(self.se_fc2(F.relu(se)))
+
+        return out * se + residual
+
+
+class SpeakerAdapter(nn.Module):
+    """Speaker adapter that extracts frame-level speaker features from audio.
+
+    Args:
+        output_dim (int): Output dimension for decoder cross-attention.
+        num_layers (int): Number of WavLM layers to use. Defaults to 6.
+        model_name (str): Pre-trained WavLM model identifier. Defaults to "WAVLM_LARGE".
+        postnet_dims (tuple): Hidden dimensions for postnet blocks. Defaults to (128, 256, 512).
+    """
+
+    def __init__(
+        self,
+        output_dim: int,
+        num_layers: int = 6,
+        model_name: Literal["WAVLM_LARGE", "WAVLM_BASE"] = "WAVLM_LARGE",
+        postnet_dims: Tuple[int, ...] = (128, 256, 512),
     ):
         super().__init__()
 
-        self.extract_layer = extract_layer
+        self.num_layers = num_layers
+        self.output_dim = output_dim
 
-        # Load pre-trained WavLM model
         bundle = getattr(torchaudio.pipelines, model_name)
         self.feature_extractor = bundle.get_model()
 
-        # Freeze pre-trained model
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
 
-        # Determine feature dimension
-        feature_dim = 1024 if model_name == "WAVLM_LARGE" else 768
+        self.layer_weights = nn.Parameter(torch.ones(num_layers))
 
-        # Adapt WavLM features to speaker embedding
-        self.postnet = nn.Sequential(
-            nn.Conv1d(feature_dim, 512, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Dropout(p=dropout),
-            nn.Conv1d(512, output_dim, kernel_size=1),
+        feature_dim = 1024 if model_name == "WAVLM_LARGE" else 768
+        channel_dims = [feature_dim] + list(postnet_dims) + [output_dim]
+
+        self.postnet = nn.ModuleList(
+            [
+                SEConvBlock(channel_dims[i], channel_dims[i + 1])
+                for i in range(len(channel_dims) - 1)
+            ]
         )
 
     def forward(
-        self, prompts: torch.Tensor, prompt_lengths: Optional[torch.Tensor] = None
+        self, prompts: torch.Tensor, prompt_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract speaker features from audio using SSL.
+        """Extract frame-level speaker features from audio.
 
         Args:
-            prompts (Tensor): Audio waveform of shape `(B, T, 1)` or `(B, T)`.
-            prompt_lengths (Optional[Tensor]): Actual lengths of shape `(B,)`.
+            prompts (Tensor): Audio waveform of shape (B, T) or (B, T, 1).
+            prompt_lengths (Tensor): Actual lengths in samples of shape (B,).
 
         Returns:
-            Tensor: Processed speaker features of shape `(B, T', D)`.
-            Tensor: Frame-level embedding lengths of shape `(B,)`.
+            Tensor: Speaker features of shape (B, T', D).
+            Tensor: Feature lengths of shape (B,).
         """
         if prompts.dim() == 3:
             prompts = prompts.squeeze(-1)
 
-        # Extract features from specified WavLM layer
+        # Extract SSL features
         with torch.no_grad():
             features, _ = self.feature_extractor.extract_features(
-                prompts, num_layers=self.extract_layer
-            )
-            extracted = features[self.extract_layer - 1]  # (B, T, D)
-
-        # Adapt the rich WavLM features
-        x = extracted.transpose(1, 2)
-        outputs = self.postnet(x).transpose(1, 2)
-
-        # Compute frame lengths based on actual processed output
-        if prompt_lengths is not None:
-            max_length = outputs.size(1)
-            ratio = prompts.size(1) / max_length
-
-            output_lengths = torch.ceil(prompt_lengths / ratio).long()
-            output_lengths = torch.clamp(output_lengths, max=max_length)
-        else:
-            batch_size, max_length, _ = outputs.size()
-            output_lengths = torch.full(
-                (batch_size,), max_length, dtype=torch.long, device=outputs.device
+                prompts, num_layers=self.num_layers
             )
 
-        return outputs, output_lengths
+        # Weighted sum of layer features
+        stacked = torch.stack(features, dim=1).transpose(2, 3)
+        weights = F.softmax(self.layer_weights, dim=0)
+        features = torch.einsum("bldt,l->bdt", stacked, weights)
+
+        # Compute feature lengths
+        ratio = prompts.size(1) / features.size(2)
+        lengths = torch.ceil(prompt_lengths / ratio).long()
+        lengths = torch.clamp(lengths, max=features.size(2))
+
+        # Apply postnet with valid mask
+        mask = ~make_padding_mask(lengths).unsqueeze(1)
+        for block in self.postnet:
+            features = block(features, mask)
+
+        return features.transpose(1, 2), lengths
