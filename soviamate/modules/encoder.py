@@ -61,7 +61,7 @@ class AudioEncoder(nn.Module):
         ffn_dim: int,
         num_heads: int,
         kernel_size: int,
-        dropout: int,
+        dropout: float,
         dynamic_chunk_sizes: List[int],
         left_context_ratio: int = 4,
         full_context_prob: float = 0.0,
