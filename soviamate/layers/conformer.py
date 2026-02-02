@@ -26,13 +26,16 @@ class SelfAttentionModule(nn.Module):
         input_dim (int): input dimension.
         num_heads (int): number of attention heads.
         dropout (float): dropout probability.
+        epsilon (float, optional): LayerNorm epsilon. (Default: 1e-5)
     """
 
-    def __init__(self, input_dim: int, num_heads: int, dropout: float) -> None:
+    def __init__(
+        self, input_dim: int, num_heads: int, dropout: float, epsilon: float = 1e-5
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
 
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.layer_norm = nn.LayerNorm(input_dim, eps=epsilon)
         self.attention = nn.MultiheadAttention(
             input_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -89,14 +92,22 @@ class CrossAttentionModule(nn.Module):
         num_heads (int): number of attention heads.
         attn_dim (int): dimension of cross-attention keys/values.
         dropout (float): dropout probability.
+        epsilon (float, optional): LayerNorm epsilon. (Default: 1e-5)
     """
 
     def __init__(
-        self, input_dim: int, num_heads: int, attn_dim: int, dropout: float
+        self,
+        input_dim: int,
+        num_heads: int,
+        attn_dim: int,
+        dropout: float,
+        epsilon: float = 1e-5,
     ) -> None:
         super().__init__()
 
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.query_norm = nn.LayerNorm(input_dim, eps=epsilon)
+        self.key_value_norm = nn.LayerNorm(attn_dim, eps=epsilon)
+
         self.attention = nn.MultiheadAttention(
             embed_dim=input_dim,
             num_heads=num_heads,
@@ -125,12 +136,13 @@ class CrossAttentionModule(nn.Module):
         Returns:
             torch.Tensor: output tensor with shape `(B, T, D)`.
         """
-        queries = self.layer_norm(inputs)
+        query = self.query_norm(inputs)
+        key_value = self.key_value_norm(prompts)
 
         x, _ = self.attention(
-            query=queries,
-            key=prompts,
-            value=prompts,
+            query=query,
+            key=key_value,
+            value=key_value,
             key_padding_mask=prompt_masks,
             need_weights=False,
         )
@@ -150,9 +162,12 @@ class ConvolutionModule(nn.Module):
         input_dim (int): input dimension.
         kernel_size (int): kernel size of depthwise convolution layer.
         dropout (float): dropout probability.
+        epsilon (float, optional): LayerNorm epsilon. (Default: 1e-5)
     """
 
-    def __init__(self, input_dim: int, kernel_size: int, dropout: float) -> None:
+    def __init__(
+        self, input_dim: int, kernel_size: int, dropout: float, epsilon: float = 1e-5
+    ) -> None:
         super().__init__()
 
         if (kernel_size - 1) % 2 != 0:
@@ -160,7 +175,7 @@ class ConvolutionModule(nn.Module):
 
         self.left_context = kernel_size - 1
 
-        self.layer_norm = nn.LayerNorm(input_dim)
+        self.layer_norm = nn.LayerNorm(input_dim, eps=epsilon)
         self.pointwise_conv1 = nn.Conv1d(input_dim, input_dim, 1)
         self.activation1 = nn.GELU()
         self.depthwise_conv = nn.Conv1d(
@@ -223,13 +238,16 @@ class FeedForwardModule(nn.Module):
         input_dim (int): input dimension.
         hidden_dim (int): hidden dimension.
         dropout (float): dropout probability.
+        epsilon (float, optional): LayerNorm epsilon. (Default: 1e-5)
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
+    def __init__(
+        self, input_dim: int, hidden_dim: int, dropout: float, epsilon: float = 1e-5
+    ) -> None:
         super().__init__()
 
         self.sequential = nn.Sequential(
-            nn.LayerNorm(input_dim),
+            nn.LayerNorm(input_dim, eps=epsilon),
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -259,6 +277,7 @@ class ConformerLayer(nn.Module):
         dropout (float): dropout probability.
         use_cross_attn (bool, optional): use cross-attention module. (Default: False)
         cross_attn_dim (int, optional): dimension of cross-attention keys/values. (Default: 256)
+        epsilon (float, optional): LayerNorm epsilon. (Default: 1e-5)
     """
 
     def __init__(
@@ -270,19 +289,20 @@ class ConformerLayer(nn.Module):
         dropout: float,
         use_cross_attn: bool = False,
         cross_attn_dim: int = 256,
+        epsilon: float = 1e-5,
     ) -> None:
         super().__init__()
+
+        self.ffn1_module = FeedForwardModule(input_dim, ffn_dim, dropout, epsilon)
+        self.attn_module = SelfAttentionModule(input_dim, num_heads, dropout, epsilon)
+        self.conv_module = ConvolutionModule(input_dim, kernel_size, dropout, epsilon)
+        self.ffn2_module = FeedForwardModule(input_dim, ffn_dim, dropout, epsilon)
+        self.layer_norm = nn.LayerNorm(input_dim, eps=epsilon)
+
         self.use_cross_attn = use_cross_attn
-
-        self.ffn1_module = FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.attn_module = SelfAttentionModule(input_dim, num_heads, dropout)
-        self.conv_module = ConvolutionModule(input_dim, kernel_size, dropout)
-        self.ffn2_module = FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.layer_norm = nn.LayerNorm(input_dim)
-
-        if use_cross_attn:
+        if self.use_cross_attn:
             self.cross_attn_module = CrossAttentionModule(
-                input_dim, num_heads, cross_attn_dim, dropout
+                input_dim, num_heads, cross_attn_dim, dropout, epsilon
             )
 
     def forward(
