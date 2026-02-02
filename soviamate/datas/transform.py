@@ -16,6 +16,8 @@
 
 import random
 
+import numpy as np
+import parselmouth
 import torch
 import torchaudio
 from torch.nn import functional as F
@@ -24,185 +26,346 @@ from torchaudio import functional as AF
 from soviamate.utils.helper import load_dataset
 
 
-class TimeStretch:
-    r"""Change the speed of the audio without modifying the pitch.
+class SpectralPerturbation:
+    """STFT-based spectral perturbation for content-speaker disentanglement.
+
+    Applies random biquad filters (low-shelving, high-shelving, peaking) in the
+    frequency domain to modify spectral characteristics while preserving content.
 
     Args:
-        min_speed_rate (float): Minimum speed rate to change the audio.
-        max_speed_rate (float): Maximum speed rate to change the audio.
-        probability (float): Probability of applying the speed perturbation
+        window_size (int): STFT window size in samples.
+        hop_length (int): STFT hop length in samples.
+        cutoff_low (float): Low-shelf filter cutoff frequency in Hz.
+        cutoff_high (float): High-shelf filter cutoff frequency in Hz.
+        num_peak (int): Number of peaking EQ bands between the shelf filters.
+        q_min (float): Minimum Q factor (bandwidth control).
+        q_max (float): Maximum Q factor (bandwidth control).
+        gain_min (float): Minimum gain in dB (can be negative for cut).
+        gain_max (float): Maximum gain in dB (can be negative for cut).
+        probability (float): Probability of applying the transform.
+    """
+
+    _DB_TO_AMP: float = np.log(10) / 40.0
+
+    def __init__(
+        self,
+        window_size: int = 1024,
+        hop_length: int = 256,
+        cutoff_low: float = 60.0,
+        cutoff_high: float = 10000.0,
+        num_peak: int = 8,
+        q_min: float = 2.0,
+        q_max: float = 5.0,
+        gain_min: float = -12.0,
+        gain_max: float = 12.0,
+        probability: float = 1.0,
+    ):
+        self.window_size = window_size
+        self.hop_length = hop_length
+        self.cutoff_low = cutoff_low
+        self.cutoff_high = cutoff_high
+        self.num_peak = num_peak
+        self.q_min = q_min
+        self.q_max = q_max
+        self.gain_min = gain_min
+        self.gain_max = gain_max
+        self.probability = probability
+
+        # Pre-compute log-spaced peak center frequencies (excluding shelf endpoints)
+        indices = torch.arange(1, num_peak + 1, dtype=torch.float32) / (num_peak + 1)
+        self.peak_centers = cutoff_low * (cutoff_high / cutoff_low) ** indices
+
+    def _biquad(
+        self, iir_coeffs: torch.Tensor, fir_coeffs: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute frequency response of a biquad filter.
+
+        Args:
+            iir_coeffs (Tensor): Feedback coefficients of shape (..., 3).
+            fir_coeffs (Tensor): Feedforward coefficients of shape (..., 3).
+
+        Returns:
+            Tensor: Complex frequency response of shape (..., window_size // 2 + 1).
+        """
+        iir = torch.fft.rfft(iir_coeffs, self.window_size, dim=-1)
+        fir = torch.fft.rfft(fir_coeffs, self.window_size, dim=-1)
+        return fir / iir
+
+    def _low_shelving(
+        self,
+        cutoff: float,
+        gain_db: torch.Tensor,
+        q_factor: torch.Tensor,
+        sample_rate: int,
+    ) -> torch.Tensor:
+        """Compute low-shelving filter frequency response.
+
+        Args:
+            cutoff (float): Cutoff frequency in Hz.
+            gain_db (Tensor): Gain in dB of shape (batch,).
+            q_factor (Tensor): Q factor of shape (batch,).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Complex frequency response of shape (batch, window_size // 2 + 1).
+        """
+        omega = 2.0 * np.pi * cutoff / sample_rate
+        sin_omega, cos_omega = np.sin(omega), np.cos(omega)
+
+        alpha = sin_omega / (2.0 * q_factor)
+        cos_omega_t = torch.full_like(q_factor, cos_omega)
+        amp = (gain_db * self._DB_TO_AMP).exp()
+        sqrt_amp = amp.sqrt()
+
+        # FIR coefficients (numerator)
+        b0 = amp * ((amp + 1) - (amp - 1) * cos_omega_t + 2 * sqrt_amp * alpha)
+        b1 = 2 * amp * ((amp - 1) - (amp + 1) * cos_omega_t)
+        b2 = amp * ((amp + 1) - (amp - 1) * cos_omega_t - 2 * sqrt_amp * alpha)
+
+        # IIR coefficients (denominator)
+        a0 = (amp + 1) + (amp - 1) * cos_omega_t + 2 * sqrt_amp * alpha
+        a1 = -2 * ((amp - 1) + (amp + 1) * cos_omega_t)
+        a2 = (amp + 1) + (amp - 1) * cos_omega_t - 2 * sqrt_amp * alpha
+
+        return self._biquad(
+            torch.stack([a0, a1, a2], dim=-1), torch.stack([b0, b1, b2], dim=-1)
+        )
+
+    def _high_shelving(
+        self,
+        cutoff: float,
+        gain_db: torch.Tensor,
+        q_factor: torch.Tensor,
+        sample_rate: int,
+    ) -> torch.Tensor:
+        """Compute high-shelving filter frequency response.
+
+        Args:
+            cutoff (float): Cutoff frequency in Hz.
+            gain_db (Tensor): Gain in dB of shape (batch,).
+            q_factor (Tensor): Q factor of shape (batch,).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Complex frequency response of shape (batch, window_size // 2 + 1).
+        """
+        omega = 2.0 * np.pi * cutoff / sample_rate
+        sin_omega, cos_omega = np.sin(omega), np.cos(omega)
+
+        alpha = sin_omega / (2.0 * q_factor)
+        cos_omega_t = torch.full_like(q_factor, cos_omega)
+        amp = (gain_db * self._DB_TO_AMP).exp()
+        sqrt_amp = amp.sqrt()
+
+        # FIR coefficients (numerator)
+        b0 = amp * ((amp + 1) + (amp - 1) * cos_omega_t + 2 * sqrt_amp * alpha)
+        b1 = -2 * amp * ((amp - 1) + (amp + 1) * cos_omega_t)
+        b2 = amp * ((amp + 1) + (amp - 1) * cos_omega_t - 2 * sqrt_amp * alpha)
+
+        # IIR coefficients (denominator)
+        a0 = (amp + 1) - (amp - 1) * cos_omega_t + 2 * sqrt_amp * alpha
+        a1 = 2 * ((amp - 1) - (amp + 1) * cos_omega_t)
+        a2 = (amp + 1) - (amp - 1) * cos_omega_t - 2 * sqrt_amp * alpha
+
+        return self._biquad(
+            torch.stack([a0, a1, a2], dim=-1), torch.stack([b0, b1, b2], dim=-1)
+        )
+
+    def _peaking_eq(
+        self,
+        center_freq: torch.Tensor,
+        gain_db: torch.Tensor,
+        q_factor: torch.Tensor,
+        sample_rate: int,
+    ) -> torch.Tensor:
+        """Compute peaking equalizer frequency response.
+
+        Args:
+            center_freq (Tensor): Center frequency in Hz of shape (batch,) or (batch, num_peak).
+            gain_db (Tensor): Gain in dB of shape (batch,) or (batch, num_peak).
+            q_factor (Tensor): Q factor of shape (batch,) or (batch, num_peak).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Complex frequency response of shape (batch, window_size // 2 + 1)
+                or (batch, num_peak, window_size // 2 + 1).
+        """
+        omega = 2.0 * np.pi * center_freq / sample_rate
+        sin_omega, cos_omega = torch.sin(omega), torch.cos(omega)
+
+        alpha = sin_omega / (2.0 * q_factor)
+        amp = (gain_db * self._DB_TO_AMP).exp()
+
+        return self._biquad(
+            torch.stack([1 + alpha / amp, -2 * cos_omega, 1 - alpha / amp], dim=-1),
+            torch.stack([1 + alpha * amp, -2 * cos_omega, 1 - alpha * amp], dim=-1),
+        )
+
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        """Apply spectral perturbation to audio waveform.
+
+        Args:
+            waveform (Tensor): Audio waveform of shape (1, num_samples).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Filtered waveform of shape (1, num_samples), normalized to [-1, 1].
+        """
+        if random.random() > self.probability:
+            return waveform
+
+        num_samples = waveform.shape[1]
+
+        # Compute STFT
+        window = torch.hann_window(self.window_size)
+        spec = torch.stft(
+            waveform,
+            n_fft=self.window_size,
+            hop_length=self.hop_length,
+            win_length=self.window_size,
+            window=window,
+            return_complex=True,
+        )
+
+        # Sample random parameters for all filters
+        num_filters = self.num_peak + 2  # peaks + low shelf + high shelf
+        power = torch.rand(1, num_filters)
+
+        q_factor = self.q_min * (self.q_max / self.q_min) ** power
+        gain_db = torch.empty(1, num_filters).uniform_(self.gain_min, self.gain_max)
+
+        # Compute peaking filters: [1, num_peak, F] -> [1, F]
+        centers = self.peak_centers.unsqueeze(0)
+        peak_response = self._peaking_eq(
+            centers, gain_db[:, :-2], q_factor[:, :-2], sample_rate
+        )
+        peak_response = torch.prod(peak_response, dim=1)
+
+        # Compute shelf filters: [1, F]
+        low_response = self._low_shelving(
+            self.cutoff_low, gain_db[:, -2], q_factor[:, -2], sample_rate
+        )
+        high_response = self._high_shelving(
+            self.cutoff_high, gain_db[:, -1], q_factor[:, -1], sample_rate
+        )
+
+        # Apply combined filter in frequency domain
+        response = peak_response * low_response * high_response
+        spec_filtered = spec * response.unsqueeze(-1)
+
+        # Inverse STFT
+        output = torch.istft(
+            spec_filtered,
+            n_fft=self.window_size,
+            hop_length=self.hop_length,
+            win_length=self.window_size,
+            window=window,
+            length=num_samples,
+        )
+
+        return output.clamp(-1.0, 1.0)
+
+
+class VoicePerturbation:
+    """PSOLA-based voice perturbation for content-speaker disentanglement.
+
+    Randomly transforms formants, pitch, and pitch dynamics to remove speaker
+    identity while preserving linguistic content.
+
+    Args:
+        formant_shift (float): Max formant shift factor. Samples from [1/f, f].
+        pitch_shift (float): Max pitch shift factor. Samples from [1/p, p].
+        pitch_range (float): Max pitch range factor. Samples from [1/r, r].
+        pitch_steps (float): F0 analysis time step in seconds.
+        pitch_floor (float): Minimum F0 for pitch detection in Hz.
+        pitch_ceiling (float): Maximum F0 for pitch detection in Hz.
+        probability (float): Probability of applying the transform.
     """
 
     def __init__(
-        self, min_speed_rate: float, max_speed_rate: float, probability: float
+        self,
+        formant_shift: float = 1.4,
+        pitch_shift: float = 1.5,
+        pitch_range: float = 1.4,
+        pitch_steps: float = 0.01,
+        pitch_floor: float = 75.0,
+        pitch_ceiling: float = 600.0,
+        probability: float = 1.0,
     ):
-        self.min_speed_rate = min_speed_rate
-        self.max_speed_rate = max_speed_rate
+        self.formant_shift = formant_shift
+        self.pitch_shift = pitch_shift
+        self.pitch_range = pitch_range
+        self.pitch_steps = pitch_steps
+        self.pitch_floor = pitch_floor
+        self.pitch_ceiling = pitch_ceiling
         self.probability = probability
 
-    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        r"""Apply the time stretch effect to the waveform.
-
-        Args:
-            waveform (Tensor): input waveform, shape `(1, L)`.
-            sample_rate (int): sample rate of the waveform.
-
-        Returns:
-            Tensor: waveform with the time stretch effect applied
-        """
-
-        if random.random() > self.probability:
-            return waveform
-
-        factor = random.uniform(self.min_speed_rate, self.max_speed_rate)
-        effector = torchaudio.io.AudioEffector(effect=f"atempo={factor}", pad_end=False)
-        waveform = effector.apply(waveform.T, sample_rate)
-
-        return waveform.T
-
-
-class PitchShift:
-    r"""Shift the pitch of audio without changing duration.
-
-    Uses Sox pitch effect to shift pitch by a specified number of semitones.
-    Preserves both duration and sample rate.
-
-    Args:
-        min_semitones (float): Minimum number of semitones to shift pitch.
-        max_semitones (float): Maximum number of semitones to shift pitch.
-        probability (float): Probability of applying pitch shift.
-    """
-
-    def __init__(self, min_semitones: float, max_semitones: float, probability: float):
-        self.min_semitones = min_semitones
-        self.max_semitones = max_semitones
-        self.probability = probability
+    def _sample_ratio(self, max_ratio: float) -> float:
+        """Sample ratio uniformly in log-space from [1/max_ratio, max_ratio]."""
+        ratio = random.uniform(1.0, max_ratio)
+        return ratio if random.random() > 0.5 else 1.0 / ratio
 
     def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        r"""Apply pitch shift to the waveform.
+        """Apply voice perturbation to audio waveform.
 
         Args:
-            waveform (Tensor): input waveform, shape `(1, L)`.
-            sample_rate (int): sample rate of the waveform.
+            waveform (Tensor): Audio waveform of shape (1, num_samples).
+            sample_rate (int): Audio sample rate in Hz.
 
         Returns:
-            Tensor: waveform with pitch shifted (same duration and sample rate)
+            Tensor: Perturbed waveform of shape (1, num_samples).
         """
         if random.random() > self.probability:
             return waveform
 
-        original_length = waveform.size(-1)
+        waveform_np = waveform.squeeze(0).numpy()
 
-        # Sample pitch shift and convert to cents (1 semitone = 100 cents)
-        semitones = random.uniform(self.min_semitones, self.max_semitones)
-        cents = int(semitones * 100)
+        # Sample random perturbation factors
+        formant_shift = self._sample_ratio(self.formant_shift)
+        pitch_shift = self._sample_ratio(self.pitch_shift)
+        pitch_range = self._sample_ratio(self.pitch_range)
 
-        # Apply pitch shift with rate normalization to preserve sample rate
-        effects = [["pitch", str(cents)], ["rate", str(sample_rate)]]
-        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
-            waveform, sample_rate, effects
-        )
+        try:
+            sound = parselmouth.Sound(waveform_np, sampling_frequency=sample_rate)
+            pitch = parselmouth.praat.call(
+                sound,
+                "To Pitch",
+                self.pitch_steps,
+                self.pitch_floor,
+                self.pitch_ceiling,
+            )
 
-        # Ensure exact duration preservation
-        padding = original_length - waveform.size(-1)
-        waveform = F.pad(waveform, (0, padding))
+            f0_array = pitch.selected_array["frequency"]
+            voiced_f0 = f0_array[f0_array > 1e-5]
+            if len(voiced_f0) == 0:
+                return waveform
 
-        return waveform
+            f0_median = np.median(voiced_f0).item()
+            new_f0_median = f0_median * pitch_shift
 
+            # Safeguard against Praat hang bug (github.com/praat/praat/issues/1926)
+            f0_min = voiced_f0.min().item()
+            scaled_min = (
+                new_f0_median + (f0_min * pitch_shift - new_f0_median) * pitch_range
+            )
+            if scaled_min < 0.0:
+                pitch_range = 1.0
 
-class AudioTrimmer:
-    r"""Trim the audio to a fixed percentage of the original length.
+            transformed = parselmouth.praat.call(
+                [sound, pitch],
+                "Change gender",
+                formant_shift,
+                new_f0_median,
+                pitch_range,
+                1.0,  # duration_factor
+            )
 
-    Args:
-        percentage (float): Percentage of the original length to keep.
-        min_duration (float): Minimum duration of the audio after trimming.
-        probability (float): Probability of applying the audio trimming.
-    """
+            waveform_np = transformed.values.squeeze(0)
 
-    def __init__(self, percentage: float, min_duration: float, probability: float):
-        self.percentage = percentage
-        self.min_duration = min_duration
-        self.probability = probability
+        except Exception:
+            pass
 
-    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        r"""Trim the waveform to the maximum length.
-
-        Args:
-            waveform (Tensor): input waveform, shape `(1, L)`.
-            sample_rate (int): sample rate of the waveform.
-
-        Returns:
-            Tensor: waveform with the trimming effect applied
-        """
-
-        if random.random() > self.probability:
-            return waveform
-
-        duration = waveform.size(1) / sample_rate * self.percentage
-        duration = max(self.min_duration, duration)
-
-        max_length = int(duration * sample_rate)
-        max_length = min(max_length, waveform.size(1))
-
-        if max_length > 0:
-            start = random.randint(0, waveform.size(1) - max_length)
-            waveform = waveform[:, start : start + max_length]
-
-        return waveform
-
-
-class SpeakerPerturbation:
-    r"""Apply speaker timbre perturbation through formant shifting.
-
-    Modifies vocal characteristics (formants) to simulate different vocal tract sizes,
-    creating variations in speaker identity while preserving linguistic content and duration.
-
-    Args:
-        min_formant_factor (float): Minimum formant shift factor.
-        max_formant_factor (float): Maximum formant shift factor.
-        probability (float): Probability of applying perturbation.
-    """
-
-    def __init__(
-        self, min_formant_factor: float, max_formant_factor: float, probability: float
-    ):
-        self.min_formant_factor = min_formant_factor
-        self.max_formant_factor = max_formant_factor
-        self.probability = probability
-
-    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        r"""Apply formant shifting to modify speaker timbre.
-
-        Args:
-            waveform (Tensor): input waveform, shape `(1, L)`.
-            sample_rate (int): sample rate of the waveform.
-
-        Returns:
-            Tensor: waveform with modified timbre (same duration and sample rate)
-        """
-        if random.random() > self.probability:
-            return waveform
-
-        original_length = waveform.size(-1)
-
-        # Sample formant shift factor (controls vocal tract size simulation)
-        factor = random.uniform(self.min_formant_factor, self.max_formant_factor)
-
-        # Step 1: Reinterpret sample rate to shift formants
-        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
-            waveform, int(sample_rate / factor), [["rate", str(sample_rate)]]
-        )
-
-        # Step 2: WSOLA time-stretch to restore original duration
-        waveform, _ = torchaudio.sox_effects.apply_effects_tensor(
-            waveform, sample_rate, [["tempo", str(factor)]]
-        )
-
-        # Ensure exact duration preservation
-        padding = original_length - waveform.size(-1)
-        waveform = F.pad(waveform, (0, padding))
-
-        return waveform
+        return torch.from_numpy(waveform_np).unsqueeze(0).float()
 
 
 class NoiseInjection:

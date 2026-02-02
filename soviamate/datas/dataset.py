@@ -14,6 +14,7 @@
 
 """Dataset modules for preprocessing and augmenting speech data"""
 
+import random
 from typing import List, Tuple
 
 from hydra.utils import instantiate
@@ -33,25 +34,72 @@ class AudioCodecDataset(Dataset):
         filepaths (List[str]): The list of metadata filepaths.
         tokenizer (DictConfig): The tokenizer configuration.
         transforms (DictConfig): The transforms configuration.
+        prompt_ratio_min (float): Minimum ratio for prompt segment. Defaults to 0.3.
+        prompt_ratio_max (float): Maximum ratio for prompt segment. Defaults to 0.5.
+        min_prompt_duration (float): Minimum duration for prompt segment. Defaults to 1.0.
     """
 
     def __init__(
-        self, filepaths: List[str], tokenizer: DictConfig, transforms: DictConfig = None
+        self,
+        filepaths: List[str],
+        tokenizer: DictConfig,
+        transforms: DictConfig = None,
+        prompt_ratio_min: float = 0.3,
+        prompt_ratio_max: float = 0.5,
+        min_prompt_duration: float = 1.0,
     ):
         super().__init__()
 
         self.dataset = load_dataset(filepaths)
         self.tokenizer = instantiate(tokenizer)
 
-        if transforms and transforms.get("content") is not None:
-            self.content_transforms = [
-                instantiate(transform) for transform in transforms.content.values()
+        self.prompt_ratio_min = prompt_ratio_min
+        self.prompt_ratio_max = prompt_ratio_max
+        self.min_prompt_duration = min_prompt_duration
+
+        if transforms and transforms.get("source") is not None:
+            self.source_transforms = [
+                instantiate(transform) for transform in transforms.source.values()
             ]
 
-        if transforms and transforms.get("speaker") is not None:
-            self.speaker_transforms = [
-                instantiate(transform) for transform in transforms.speaker.values()
+        if transforms and transforms.get("prompt") is not None:
+            self.prompt_transforms = [
+                instantiate(transform) for transform in transforms.prompt.values()
             ]
+
+    def _split_audio(
+        self, audio: torch.Tensor, sample_rate: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Split audio into non-overlapping content and prompt segments.
+
+        Args:
+            audio: Audio tensor of shape (1, T).
+            sample_rate: Audio sample rate.
+
+        Returns:
+            content_audio: Second portion for source/target.
+            prompt_audio: First portion for speaker conditioning.
+        """
+        total_samples = audio.shape[1]
+        min_prompt_samples = int(self.min_prompt_duration * sample_rate)
+
+        # Sample dynamic prompt ratio between min and max
+        prompt_ratio = random.uniform(self.prompt_ratio_min, self.prompt_ratio_max)
+        prompt_samples = int(total_samples * prompt_ratio)
+
+        # Ensure prompt meets minimum duration
+        prompt_samples = max(prompt_samples, min_prompt_samples)
+        prompt_samples = min(prompt_samples, total_samples - min_prompt_samples)
+
+        # If audio is too short, use minimum prompt duration
+        if prompt_samples < min_prompt_samples:
+            prompt_samples = min(min_prompt_samples, total_samples // 2)
+
+        # Split into non-overlapping segments
+        prompt_audio = audio[:, :prompt_samples]
+        content_audio = audio[:, prompt_samples:]
+
+        return content_audio, prompt_audio
 
     def __len__(self):
         return len(self.dataset)
@@ -65,20 +113,23 @@ class AudioCodecDataset(Dataset):
         decoder = AudioDecoder(
             sample["audio_filepath"], sample_rate=16000, num_channels=1
         )
+
         signal = decoder.get_all_samples()
-
-        # Prepare source, prompt, and target audios
         audio, sample_rate = signal.data, signal.sample_rate
-        source_audio = target_audio = prompt_audio = audio.clone()
 
-        # Apply content transforms if any (noise, RIR, etc.)
-        if hasattr(self, "content_transforms"):
-            for transform in self.content_transforms:
+        # Split audio into content and prompt segments
+        content_audio, prompt_audio = self._split_audio(audio, sample_rate)
+        target_audio = content_audio.clone()
+
+        # Apply source transforms if any
+        source_audio = content_audio.clone()
+        if hasattr(self, "source_transforms"):
+            for transform in self.source_transforms:
                 source_audio = transform.apply(source_audio, sample_rate)
 
-        # Apply speaker transforms if any (trimming, speed perturbation, etc.)
-        if hasattr(self, "speaker_transforms"):
-            for transform in self.speaker_transforms:
+        # Apply prompt transforms if any
+        if hasattr(self, "prompt_transforms"):
+            for transform in self.prompt_transforms:
                 prompt_audio = transform.apply(prompt_audio, sample_rate)
 
         target_tokens = self.tokenizer.encode(sample["transcript"])

@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
@@ -998,6 +998,24 @@ wheels = [
 ]
 
 [[package]]
+name = "praat-parselmouth"
+version = "0.4.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4f/28/2c1204fe3e7aeb6942051ff6776e31da52c7ab5b7df2ca438f371bd60d8a/praat_parselmouth-0.4.7.tar.gz", hash = "sha256:6dd81d246ce1eef5fd93d8cbdaf1bef61ca40ef1d2fc12aa23996a28071181e6", size = 22526491, upload-time = "2025-11-27T20:08:58.276Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/8b/e3ac60fd972d457ecf6b0b0bdd9b651f578c0f50ce31b4e176065ad1713d/praat_parselmouth-0.4.7-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:fe123f5004e77a3a39150fc0b64b8960404c87ca8bb2a2e031c73ebd32d8e548", size = 17673383, upload-time = "2025-11-27T20:02:09.287Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/e3/60f2caa3df1382bf24e171c6be2bf7c8fc0d5f9b443701a9b3397596c899/praat_parselmouth-0.4.7-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:5892deae3631d691c6339455f1bce065e095c77634299e57bb00df94041f7db3", size = 9051957, upload-time = "2025-11-27T20:02:13.435Z" },
+    { url = "https://files.pythonhosted.org/packages/75/ea/10e0f1bb64923c27dec9fcd3c28852751565df8ba3beb5ae1d8288fa65f8/praat_parselmouth-0.4.7-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:29e468febc3de2acad8f7718b10cc800610871e229afc549b6b51f009a87ede7", size = 8635367, upload-time = "2025-11-27T20:02:16.791Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/a8/d410e7f10ca97293cf271f94c8ddff70deeac44d3b8a524aa44c796f52cc/praat_parselmouth-0.4.7-cp312-cp312-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:e3fc0be825c5d1a4a05d2f85c5d8ff214d7178579cd2dd036cb902d9737a8d80", size = 10711677, upload-time = "2025-11-27T20:02:19.445Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/5f/e4495c8ac6ed26a1f16a34269c12579532e747b4ac5db57123093904f2ec/praat_parselmouth-0.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:6b5fbfab5b3cd4f6146e6145559d5d7c231384d88f942e0c8c0e791058aa61a5", size = 10749363, upload-time = "2025-11-27T20:02:23.082Z" },
+    { url = "https://files.pythonhosted.org/packages/50/f3/6b7a92ab093e89b58c7abbda93ca9a7b1e72c1a5c020d49f42e8856c6740/praat_parselmouth-0.4.7-cp312-cp312-win32.whl", hash = "sha256:fb579964b92e7aa5774badfa760570a6645641592cb5eb9e50b5a2225875b210", size = 8125421, upload-time = "2025-11-27T20:02:26.073Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/df/a358062226918326825b7af95850ce561a22c6dcdc2cac0665a8efc6a2d9/praat_parselmouth-0.4.7-cp312-cp312-win_amd64.whl", hash = "sha256:7cfd6941a4e8dd1d8398260f1269a831b84e9f230b03c569993e144a20704f99", size = 8958177, upload-time = "2025-11-27T20:02:29.308Z" },
+]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.52"
 source = { registry = "https://pypi.org/simple" }
@@ -1306,6 +1324,7 @@ source = { editable = "." }
 dependencies = [
     { name = "hydra-core" },
     { name = "lightning" },
+    { name = "praat-parselmouth" },
     { name = "sentencepiece" },
     { name = "torch" },
     { name = "torchaudio" },
@@ -1327,6 +1346,7 @@ test = [
 requires-dist = [
     { name = "hydra-core", specifier = ">=1.3.2" },
     { name = "lightning", specifier = ">=2.5.2" },
+    { name = "praat-parselmouth", specifier = ">=0.4.7" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
     { name = "torch", specifier = ">=2.8.0,<2.9.0" },
     { name = "torchaudio", specifier = ">=2.8.0,<2.9.0" },
