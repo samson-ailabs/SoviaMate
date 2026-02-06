@@ -51,24 +51,6 @@ class FiniteScalarQuantizer(nn.Module):
         self.pre_quant = nn.Linear(input_dim, len(fsq_levels))
         self.post_quant = nn.Linear(len(fsq_levels), input_dim)
 
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """Initialize weights for proper variance propagation."""
-        fan_in = self.pre_quant.in_features
-        fan_out = self.pre_quant.out_features
-        pre_gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
-
-        nn.init.xavier_uniform_(self.pre_quant.weight, gain=pre_gain)
-        nn.init.zeros_(self.pre_quant.bias)
-
-        fan_in = self.post_quant.in_features
-        fan_out = self.post_quant.out_features
-        post_gain = math.sqrt((fan_in + fan_out) / (2 * fan_in))
-
-        nn.init.xavier_uniform_(self.post_quant.weight, gain=post_gain)
-        nn.init.zeros_(self.post_quant.bias)
-
     def forward(
         self, features: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -163,18 +145,10 @@ class FiniteScalarQuantizer(nn.Module):
     def _inverse_scale_and_shift(self, idxs: torch.Tensor) -> torch.Tensor:
         return idxs * 2 / (self.levels - 1) - 1
 
-    def _indices_to_level_indices(self, indices: torch.Tensor) -> torch.Tensor:
-        indices = indices.unsqueeze(-1)
-        codes_non_centered = (indices // self.basis) % self.levels
-        return codes_non_centered
-
     def _indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
-        level_indices = self._indices_to_level_indices(indices)
-        codes = self._inverse_scale_and_shift(level_indices)
-        return codes
+        level_indices = (indices.unsqueeze(-1) // self.basis) % self.levels
+        return self._inverse_scale_and_shift(level_indices)
 
     def _codes_to_indices(self, qx: torch.Tensor) -> torch.Tensor:
-        qx = self._scale_and_shift(qx)
-        qx = (qx * self.basis).sum(dim=-1)
-        idx = qx.round().type(torch.int64)
-        return idx
+        level_indices = self._scale_and_shift(qx).round().to(torch.int64)
+        return (level_indices * self.basis).sum(dim=-1)
