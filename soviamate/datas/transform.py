@@ -301,8 +301,8 @@ class VoicePerturbation:
         self.probability = probability
 
     def _sample_ratio(self, max_ratio: float) -> float:
-        """Sample ratio uniformly in log-space from [1/max_ratio, max_ratio]."""
-        ratio = random.uniform(1.0, max_ratio)
+        """Sample ratio symmetrically from [1/max_ratio, max_ratio]."""
+        ratio = random.random() * (max_ratio - 1.0) + 1.0
         return ratio if random.random() > 0.5 else 1.0 / ratio
 
     def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
