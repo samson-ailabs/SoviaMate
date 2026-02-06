@@ -49,7 +49,6 @@ class AudioDecoder(nn.Module):
         full_context_prob (float, optional): probability of full context mode. Default: 0.0.
         use_cross_attn (bool, optional): use cross-attention module. Default: False.
         cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
-        epsilon (float, optional): epsilon for layer normalization. Default: 1e-2.
     """
 
     def __init__(
@@ -68,7 +67,6 @@ class AudioDecoder(nn.Module):
         full_context_prob: float = 0.0,
         use_cross_attn: bool = False,
         cross_attn_dim: int = 256,
-        epsilon: float = 1e-2,
     ):
         super().__init__()
 
@@ -97,7 +95,6 @@ class AudioDecoder(nn.Module):
                     dropout,
                     use_cross_attn,
                     cross_attn_dim,
-                    epsilon,
                 )
                 for _ in range(num_layers)
             ]
