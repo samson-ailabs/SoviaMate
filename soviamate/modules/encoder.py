@@ -47,8 +47,6 @@ class AudioEncoder(nn.Module):
         dynamic_chunk_sizes (List[int]): chunk sizes to sample from during training.
         left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
         full_context_prob (float, optional): probability of full context mode. Default: 0.0.
-        use_cross_attn (bool, optional): use cross-attention module. Default: False.
-        cross_attn_dim (int, optional): dimension of cross-attention. Default: 256.
     """
 
     def __init__(
@@ -65,8 +63,6 @@ class AudioEncoder(nn.Module):
         dynamic_chunk_sizes: List[int],
         left_context_ratio: int = 4,
         full_context_prob: float = 0.0,
-        use_cross_attn: bool = False,
-        cross_attn_dim: int = 256,
     ):
         super().__init__()
 
@@ -79,7 +75,6 @@ class AudioEncoder(nn.Module):
 
         self.embed_dim = d_model
         self.kernel_size = kernel_size
-        self.use_cross_attn = use_cross_attn
 
         self.dynamic_chunk_sizes = dynamic_chunk_sizes
         self.left_context_ratio = left_context_ratio
@@ -94,15 +89,7 @@ class AudioEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                ConformerLayer(
-                    d_model,
-                    ffn_dim,
-                    num_heads,
-                    kernel_size,
-                    dropout,
-                    use_cross_attn,
-                    cross_attn_dim,
-                )
+                ConformerLayer(d_model, ffn_dim, num_heads, kernel_size, dropout)
                 for _ in range(num_layers)
             ]
         )
@@ -154,7 +141,7 @@ class AudioEncoder(nn.Module):
         zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
         prompt_mask = None
-        if self.use_cross_attn and prompts is not None:
+        if prompts is not None:
             prompt_mask = make_padding_mask(prompt_lengths)
 
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
@@ -220,7 +207,7 @@ class AudioEncoder(nn.Module):
         )
 
         prompt_mask = None
-        if self.use_cross_attn and prompts is not None:
+        if prompts is not None:
             prompt_mask = make_padding_mask(prompt_lengths)
 
         new_caches = []

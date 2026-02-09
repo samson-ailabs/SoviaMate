@@ -19,8 +19,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SelfAttentionModule(nn.Module):
-    r"""Chunk-based self attention module.
+class AttentionModule(nn.Module):
+    r"""Unified attention module supporting both self-attention and cross-attention.
 
     Args:
         input_dim (int): input dimension.
@@ -41,110 +41,57 @@ class SelfAttentionModule(nn.Module):
     def forward(
         self,
         inputs: torch.Tensor,
-        padding_masks: torch.Tensor,
-        attention_masks: torch.Tensor,
+        padding_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
         contexts: torch.Tensor,
-    ) -> torch.Tensor:
+        prompts: torch.Tensor = None,
+        prompt_mask: torch.Tensor = None,
+    ):
         r"""
         Args:
-            inputs (Tensor): with shape `(B, T, D)`.
-            padding_masks (Tensor): with shape `(B, T)`.
-                A ``True`` value indicates the corresponding key value will be ignored.
-            attention_masks (Tensor): with shape `(T, T + left_context)`.
-                A ``True`` value indicates the corresponding position is not allowed to attend.
-            contexts (Tensor): with shape `(B, left_context, D)`.
-                The cached left context used in the streaming self-attention mechanism.
+            inputs (Tensor): query input with shape `(B, T, D)`.
+            padding_mask (Tensor): padding mask for inputs with shape `(B, T)`.
+            attention_mask (Tensor): causal mask with shape `(T, T + left_context)`.
+            contexts (Tensor): streaming cache with shape `(B, left_context, D)`.
+            prompts (Tensor, optional): conditional prompts with shape `(B, T', D)`.
+            prompt_mask (Tensor, optional): prompt padding mask with shape `(B, T')`.
 
         Returns:
-            torch.Tensor: outputs, with shape `(B, T, D)`.
-        """
-
-        query = self.layer_norm(inputs)
-
-        key = value = torch.cat([contexts, query], dim=1)
-        cache = key[:, query.size(1) :, :]
-
-        num_pads = attention_masks.size(1) - padding_masks.size(1)
-        padding_masks = F.pad(padding_masks, (num_pads, 0), value=0)
-
-        x, _ = self.attention(
-            query,
-            key,
-            value,
-            key_padding_mask=padding_masks,
-            attn_mask=attention_masks,
-            need_weights=False,
-        )
-
-        x = self.dropout(x)
-
-        return x, cache
-
-
-class CrossAttentionModule(nn.Module):
-    r"""Position-agnostic cross-attention module for external conditioning.
-
-    Args:
-        input_dim (int): input dimension.
-        num_heads (int): number of attention heads.
-        attn_dim (int): dimension of cross-attention keys/values.
-        dropout (float): dropout probability.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        num_heads: int,
-        attn_dim: int,
-        dropout: float,
-    ) -> None:
-        super().__init__()
-        self.layer_norm = nn.LayerNorm(input_dim)
-        self.attention = nn.MultiheadAttention(
-            embed_dim=input_dim,
-            num_heads=num_heads,
-            kdim=attn_dim,
-            vdim=attn_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        prompts: torch.Tensor,
-        padding_masks: torch.Tensor = None,
-        prompt_masks: torch.Tensor = None,
-    ) -> torch.Tensor:
-        r"""Apply position-agnostic cross-attention.
-
-        Args:
-            inputs (Tensor): input tensor with shape `(B, T, D)`.
-            prompts (Tensor): prompt features with shape `(B, T', D')`.
-            padding_masks (torch.Tensor, optional): padding mask for inputs with shape `(B, T)`.
-            prompt_masks (torch.Tensor, optional): padding mask for prompts with shape `(B, T')`.
-
-        Returns:
-            torch.Tensor: output tensor with shape `(B, T, D)`.
+            Tuple[Tensor, Tensor]: (output, cache) with shapes `(B, T, D)`
+                and `(B, left_context, D)`.
         """
         query = self.layer_norm(inputs)
-        key = value = prompts.clone()
 
-        x, _ = self.attention(
-            query=query,
-            key=key,
-            value=value,
-            key_padding_mask=prompt_masks,
-            need_weights=False,
-        )
+        if prompts is not None:
+            # Cross-attention for prompt conditioning
+            x, _ = self.attention(
+                query, prompts, prompts,
+                key_padding_mask=prompt_mask,
+                need_weights=False,
+            )
+            x = self.dropout(x)
 
-        x = self.dropout(x)
+            if padding_mask is not None:
+                x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)
 
-        if padding_masks is not None:
-            x = x.masked_fill(padding_masks.unsqueeze(-1), 0.0)
+            return x, contexts
+        else:
+            # Self-attention with streaming cache
+            key = value = torch.cat([contexts, query], dim=1)
+            cache = key[:, query.size(1) :, :]
 
-        return x
+            num_pads = attention_mask.size(1) - padding_mask.size(1)
+            kv_mask = F.pad(padding_mask, (num_pads, 0), value=0)
+
+            x, _ = self.attention(
+                query, key, value,
+                key_padding_mask=kv_mask,
+                attn_mask=attention_mask,
+                need_weights=False,
+            )
+            x = self.dropout(x)
+
+            return x, cache
 
 
 class ConvolutionModule(nn.Module):
@@ -264,8 +211,6 @@ class ConformerLayer(nn.Module):
         num_heads (int): number of attention heads.
         kernel_size (int): kernel size of depthwise convolution layer.
         dropout (float): dropout probability.
-        use_cross_attn (bool, optional): use cross-attention module. (Default: False)
-        cross_attn_dim (int, optional): dimension of cross-attention keys/values. (Default: 256)
     """
 
     def __init__(
@@ -275,22 +220,13 @@ class ConformerLayer(nn.Module):
         num_heads: int,
         kernel_size: int,
         dropout: float,
-        use_cross_attn: bool = False,
-        cross_attn_dim: int = 256,
     ) -> None:
         super().__init__()
-
         self.ffn1_module = FeedForwardModule(input_dim, ffn_dim, dropout)
-        self.attn_module = SelfAttentionModule(input_dim, num_heads, dropout)
+        self.attn_module = AttentionModule(input_dim, num_heads, dropout)
         self.conv_module = ConvolutionModule(input_dim, kernel_size, dropout)
         self.ffn2_module = FeedForwardModule(input_dim, ffn_dim, dropout)
         self.layer_norm = nn.LayerNorm(input_dim)
-
-        self.use_cross_attn = use_cross_attn
-        if self.use_cross_attn:
-            self.cross_attn_module = CrossAttentionModule(
-                input_dim, num_heads, cross_attn_dim, dropout
-            )
 
     def forward(
         self,
@@ -309,23 +245,21 @@ class ConformerLayer(nn.Module):
             attn_mask (Tensor): attention mask, with shape `(T, T + left_context)`.
             conv_cache (Tensor): convolution cache, with shape `(B, D, kernel_size - 1)`.
             attn_cache (Tensor): attention cache, with shape `(B, left_context, D)`.
-            prompt (torch.Tensor, optional): prompt features, with shape `(B, T', D')`.
-            prompt_mask (torch.Tensor, optional): padding mask for prompts, with shape `(B, T')`.
+            prompt (torch.Tensor, optional): speaker prompt, with shape `(B, T', D)`.
+            prompt_mask (torch.Tensor, optional): prompt padding mask, with shape `(B, T')`.
 
         Returns:
             torch.Tensor: output, with shape `(B, T, D)`.
         """
-
         residual = x
         x = self.ffn1_module(x)
         x = x * 0.5 + residual
 
         residual = x
-        x, attn_cache = self.attn_module(x, conv_mask, attn_mask, attn_cache)
+        x, attn_cache = self.attn_module(
+            x, conv_mask, attn_mask, attn_cache, prompt, prompt_mask
+        )
         x = x + residual
-
-        if self.use_cross_attn and prompt is not None:
-            x = x + self.cross_attn_module(x, prompt, conv_mask, prompt_mask)
 
         residual = x
         x, conv_cache = self.conv_module(x, conv_mask, conv_cache)
