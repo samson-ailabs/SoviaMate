@@ -81,6 +81,9 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.speaker_loss = None
 
+        # Gradient scaling for speaker disentanglement (0.0=stop-grad, 1.0=normal)
+        self.recon_grad_scale = getattr(model, "recon_grad_scale", 1.0)
+
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
             self.hparams.data.trainset,
@@ -168,6 +171,13 @@ class AudioCodecTask(L.LightningModule):
 
             output_tokens, output_token_lengths = self.text_decoder(
                 asr_features, asr_feature_lengths
+            )
+
+        # Scale reconstruction gradients for speaker disentanglement
+        if self.recon_grad_scale < 1.0:
+            source_features = (
+                source_features * self.recon_grad_scale
+                + source_features.detach() * (1 - self.recon_grad_scale)
             )
 
         # Audio quantization branch

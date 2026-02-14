@@ -42,6 +42,7 @@ task:
 
   model:
     d_model: &d_model 1024
+    recon_grad_scale: 0.05
 
     frame_stacking: &frame_stacking 2
     window_length: &window_length 800
@@ -64,23 +65,18 @@ task:
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
 
-    splice_out:
-      _target_: soviamate.layers.processor.SpliceOutProcessor
-      num_splices: 4
-      max_splice_length: 5
-      probability: 0.5
+    # splice_out:
+    #   _target_: soviamate.layers.processor.SpliceOutProcessor
+    #   num_splices: 4
+    #   max_splice_length: 5
+    #   probability: 0.5
 
     text_decoder:
       _target_: soviamate.modules.decoder.TextDecoder
+      input_dim: *d_model
       output_dim: *vocab_size
-      num_layers: 2
-      d_model: *d_model
-      ffn_dim: 4096
-      num_heads: 8
-      kernel_size: 9
+      hidden_dim: 2048
       dropout: 0.1
-      dynamic_chunk_sizes: *dynamic_chunk_sizes
-      full_context_prob: *full_context_prob
 
     audio_decoder:
       _target_: soviamate.modules.decoder.AudioDecoder
@@ -95,8 +91,6 @@ task:
       dropout: 0.1
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
-      use_cross_attn: true
-      cross_attn_dim: *d_model
 
     audio_quantizer:
       _target_: soviamate.modules.quantizer.FiniteScalarQuantizer
@@ -107,9 +101,8 @@ task:
     speaker_adapter:
       _target_: soviamate.modules.adapter.SpeakerAdapter
       output_dim: *d_model
-      layer_index: 6
+      num_layers: 6
       model_name: WAVLM_LARGE
-      postnet_dims: [128, 256, 512]
 
     discriminator:
       _target_: soviamate.modules.discriminator.MultiScaleDiscriminators
@@ -132,14 +125,14 @@ task:
       _target_: soviamate.modules.criterion.SequenceToSequenceLoss
       zero_infinity: true
 
-    speaker_loss:
-      _target_: soviamate.modules.criterion.SequenceContrastiveLoss
-      input_dim: *d_model
-      projector_dim: 4096
-      lambda_inv: 25.0
-      lambda_var: 25.0
-      lambda_cov: 1.0
-      variance_gamma: 1.0
+    # speaker_loss:
+    #   _target_: soviamate.modules.criterion.SequenceContrastiveLoss
+    #   input_dim: *d_model
+    #   projector_dim: 4096
+    #   lambda_inv: 25.0
+    #   lambda_var: 25.0
+    #   lambda_cov: 1.0
+    #   variance_gamma: 1.0
 
   optim:
     total_steps: &total_steps 900000
