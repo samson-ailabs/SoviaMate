@@ -115,10 +115,10 @@ task:
       noise_dropout: 0.5
 
     speaker_adapter:
-      _target_: soviamate.modules.adapter.SpeakerAdapter
+      _target_: soviamate.modules.adapter.MemoryAugmentedAdapter
       output_dim: *d_model
-      num_layers: 6
-      model_name: WAVLM_LARGE
+      attention_dim: 256
+      sv_checkpoint: checkpoints/speaker_verification/campplus.bin
 
     discriminator:
       _target_: soviamate.modules.discriminator.MultiScaleDiscriminators

@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torchaudio
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 
@@ -30,15 +31,19 @@ class CodecInputs:
 
     Attributes:
         source_audios: Batched audio tensors (B, T, 1).
-        source_lengths: Length of each audio (B,).
+        source_audio_lengths: Length of each audio (B,).
         prompt_audios: Optional speaker prompts (B, T_prompt, 1).
-        prompt_lengths: Optional prompt lengths (B,).
+        prompt_audio_lengths: Optional prompt lengths (B,).
+        prompt_fbanks: Optional fbank features (B, T', n_mels).
+        prompt_fbank_lengths: Optional fbank lengths (B,).
     """
 
     source_audios: torch.Tensor
-    source_lengths: torch.Tensor
+    source_audio_lengths: torch.Tensor
     prompt_audios: Optional[torch.Tensor] = None
-    prompt_lengths: Optional[torch.Tensor] = None
+    prompt_audio_lengths: Optional[torch.Tensor] = None
+    prompt_fbanks: Optional[torch.Tensor] = None
+    prompt_fbank_lengths: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -63,7 +68,7 @@ class AudioCodecBundle(nn.Module):
 
     This class bundles the audio encoder, quantizer, and decoder along with
     optional ASR decoder. Supports speaker-controlled voice conversion via
-    WavLM-based speaker adaptation. Loads from checkpoints created by
+    CAM++ speaker adaptation. Loads from checkpoints created by
     AudioCodecTask.export_model() for production deployment.
 
     Args:
@@ -85,6 +90,9 @@ class AudioCodecBundle(nn.Module):
         device: Optional[Union[str, torch.device]] = None,
     ):
         super().__init__()
+
+        self.n_mels = 80  # Must match speaker adapter config
+        self.sample_rate = 16000  # Must match speaker adapter config
 
         self.audio_encoder = audio_encoder
         self.audio_quantizer = audio_quantizer
@@ -247,14 +255,14 @@ class AudioCodecBundle(nn.Module):
             CodecInputs with batched tensors ready for processing.
         """
         if isinstance(source_audios, list):
-            source_audios, source_lengths = self.pack_sequence(source_audios)
+            source_audios, source_audio_lengths = self.pack_sequence(source_audios)
         else:
             source_audios = source_audios.t().unsqueeze(0)
-            source_lengths = torch.tensor(
+            source_audio_lengths = torch.tensor(
                 [source_audios.size(1)], device=source_audios.device
             )
 
-        prompt_lengths = None
+        prompt_audio_lengths = None
         batch_size = source_audios.size(0)
 
         if prompt_audios is not None:
@@ -264,22 +272,72 @@ class AudioCodecBundle(nn.Module):
                         f"Number of prompts ({len(prompt_audios)}) must match "
                         f"number of audios ({batch_size})"
                     )
-                prompt_audios, prompt_lengths = self.pack_sequence(prompt_audios)
+                prompt_audios, prompt_audio_lengths = self.pack_sequence(prompt_audios)
             else:
                 prompt_audios = prompt_audios.t().unsqueeze(0)
                 prompt_audios = prompt_audios.expand(batch_size, -1, -1)
 
                 seq_length, device = prompt_audios.size(1), prompt_audios.device
-                prompt_lengths = torch.full(
+                prompt_audio_lengths = torch.full(
                     (batch_size,), seq_length, dtype=torch.long, device=device
                 )
 
+        # Compute fbank features for speaker adapter
+        prompt_fbanks = None
+        prompt_fbank_lengths = None
+
+        if prompt_audios is not None and self.speaker_adapter is not None:
+            prompt_fbanks, prompt_fbank_lengths = self._compute_fbank(
+                prompt_audios, prompt_audio_lengths
+            )
+
         return CodecInputs(
             source_audios=source_audios,
-            source_lengths=source_lengths,
+            source_audio_lengths=source_audio_lengths,
             prompt_audios=prompt_audios,
-            prompt_lengths=prompt_lengths,
+            prompt_audio_lengths=prompt_audio_lengths,
+            prompt_fbanks=prompt_fbanks,
+            prompt_fbank_lengths=prompt_fbank_lengths,
         )
+
+    def _compute_fbank(
+        self, audios: torch.Tensor, audio_lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute kaldi fbank features with cepstral mean normalization.
+
+        Args:
+            audios: Batched waveform of shape (B, T, 1).
+            audio_lengths: Actual lengths in samples of shape (B,).
+
+        Returns:
+            fbanks: Padded fbank features of shape (B, T', n_mels).
+            fbank_lengths: Feature lengths of shape (B,).
+        """
+        batch_size = audios.size(0)
+        device = audios.device
+
+        fbanks, fbank_lengths = [], []
+        for i in range(batch_size):
+            length = audio_lengths[i].item()
+            wav = audios[i, :length, 0].unsqueeze(0)
+
+            fbank = torchaudio.compliance.kaldi.fbank(
+                wav, num_mel_bins=self.n_mels, sample_frequency=self.sample_rate
+            )
+            fbank = fbank - fbank.mean(dim=0, keepdim=True)
+
+            fbanks.append(fbank)
+            fbank_lengths.append(fbank.size(0))
+
+        max_len = max(fbank_lengths)
+        padded_fbank = torch.zeros(
+            batch_size, max_len, self.n_mels, device=device, dtype=audios.dtype
+        )
+        for i, fbank in enumerate(fbanks):
+            padded_fbank[i, : fbank.size(0)] = fbank
+
+        fbank_lengths = torch.tensor(fbank_lengths, dtype=torch.long, device=device)
+        return padded_fbank, fbank_lengths
 
     def _process(
         self,
@@ -309,8 +367,8 @@ class AudioCodecBundle(nn.Module):
             )
 
         # Encode source audio
-        source_features, source_lengths = self.audio_encoder(
-            codec_inputs.source_audios, codec_inputs.source_lengths
+        source_features, source_audio_lengths = self.audio_encoder(
+            codec_inputs.source_audios, codec_inputs.source_audio_lengths
         )
 
         # ASR decoding (optional): use source features only
@@ -319,32 +377,35 @@ class AudioCodecBundle(nn.Module):
 
         if return_tokens:
             output_tokens, token_lengths = self.text_decoder(
-                source_features, source_lengths
+                source_features, source_audio_lengths
             )
 
         # Quantize with FSQ
         quantized_outputs, quantized_lengths = self.audio_quantizer(
-            source_features, source_lengths
+            source_features, source_audio_lengths
         )
 
-        # Extract speaker embeddings from prompt (optional)
-        speaker_embeddings = None
-        speaker_lengths = None
+        # Extract speaker features from prompt (optional)
+        speaker_features = None
+        speaker_feature_lengths = None
 
         if self.speaker_adapter is not None and codec_inputs.prompt_audios is not None:
-            speaker_embeddings, speaker_lengths = self.speaker_adapter(
-                codec_inputs.prompt_audios, codec_inputs.prompt_lengths
+            speaker_features, speaker_feature_lengths = self.speaker_adapter(
+                codec_inputs.prompt_audios,
+                codec_inputs.prompt_audio_lengths,
+                codec_inputs.prompt_fbanks,
+                codec_inputs.prompt_fbank_lengths,
             )
 
         # Calculate maximum output length for exact reconstruction
-        max_output_length = codec_inputs.source_lengths.max().item()
+        max_output_length = codec_inputs.source_audio_lengths.max().item()
 
         # Decode with speaker conditioning
         output_audios, output_lengths = self.audio_decoder(
             quantized_outputs,
             quantized_lengths,
-            speaker_embeddings,
-            speaker_lengths,
+            speaker_features,
+            speaker_feature_lengths,
             max_output_length,
         )
 
