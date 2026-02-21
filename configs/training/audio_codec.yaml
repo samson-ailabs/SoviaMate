@@ -30,6 +30,22 @@ task:
             pitch_range: 1.5
             probability: 1.0
 
+        prompt:
+          trimmer:
+            _target_: soviamate.datas.transform.PromptTrimmer
+            min_ratio: 0.2
+            max_ratio: 0.5
+            min_duration: 1.0
+            max_duration: 5.0
+            probability: 1.0
+
+          shuffle:
+            _target_: soviamate.datas.transform.WaveformShuffle
+            min_segment_ms: 80
+            max_segment_ms: 250
+            fade_ms: 5.0
+            probability: 1.0
+
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
       filepaths: /vast/tts/samson/Libri-Heavy/valset.jsonl

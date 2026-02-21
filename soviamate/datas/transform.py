@@ -473,6 +473,162 @@ class ImpulseResponse:
         return waveform
 
 
+class PromptTrimmer:
+    """Random crop of a ratio-proportional segment, clamped to a duration range.
+
+    Args:
+        min_ratio (float): Minimum crop ratio of total duration. Defaults to 0.2.
+        max_ratio (float): Maximum crop ratio of total duration. Defaults to 0.5.
+        min_duration (float): Hard floor in seconds. Defaults to 1.0.
+        max_duration (float): Hard ceiling in seconds. Defaults to 5.0.
+        probability (float): Probability of applying the transform. Defaults to 1.0.
+    """
+
+    def __init__(
+        self,
+        min_ratio: float = 0.2,
+        max_ratio: float = 0.5,
+        min_duration: float = 1.0,
+        max_duration: float = 5.0,
+        probability: float = 1.0,
+    ):
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
+        self.min_duration = min_duration
+        self.max_duration = max_duration
+        self.probability = probability
+
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        """Apply ratio-based random crop to waveform.
+
+        Args:
+            waveform (Tensor): Audio waveform of shape (1, T).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Cropped waveform of shape (1, T_cropped).
+        """
+        if random.random() > self.probability:
+            return waveform
+
+        num_samples = waveform.shape[1]
+        min_samples = int(self.min_duration * sample_rate)
+
+        if num_samples <= min_samples:
+            return waveform
+
+        ratio = random.uniform(self.min_ratio, self.max_ratio)
+        max_samples = int(self.max_duration * sample_rate)
+
+        target_samples = int(num_samples * ratio)
+        target_samples = max(min_samples, min(target_samples, max_samples))
+
+        max_start = num_samples - target_samples
+        start = random.randint(0, max_start)
+
+        return waveform[:, start : start + target_samples]
+
+
+class WaveformShuffle:
+    """Variable-length segment shuffle for content-timbre disentanglement.
+
+    Args:
+        min_segment_ms (int): Minimum segment length in milliseconds. Defaults to 80.
+        max_segment_ms (int): Maximum segment length in milliseconds. Defaults to 250.
+        fade_ms (float): Cosine fade at segment boundaries in ms. Defaults to 5.0.
+        probability (float): Probability of applying the transform. Defaults to 1.0.
+    """
+
+    def __init__(
+        self,
+        min_segment_ms: int = 80,
+        max_segment_ms: int = 250,
+        fade_ms: float = 5.0,
+        probability: float = 1.0,
+    ):
+        self.min_segment_ms = min_segment_ms
+        self.max_segment_ms = max_segment_ms
+        self.fade_ms = fade_ms
+        self.probability = probability
+
+    def apply(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        """Apply variable-length segment shuffling to waveform.
+
+        Args:
+            waveform (Tensor): Audio waveform of shape (1, T).
+            sample_rate (int): Audio sample rate in Hz.
+
+        Returns:
+            Tensor: Shuffled waveform of shape (1, T), same length, reordered.
+        """
+        if random.random() > self.probability:
+            return waveform
+
+        num_samples = waveform.shape[1]
+        min_samples = int(self.min_segment_ms / 1000.0 * sample_rate)
+        max_samples = int(self.max_segment_ms / 1000.0 * sample_rate)
+        fade_samples = int(self.fade_ms / 1000.0 * sample_rate)
+
+        # Partition waveform into variable-length segments
+        boundaries = []
+        pos = 0
+        while pos < num_samples:
+            seg_len = random.randint(min_samples, max_samples)
+            seg_len = min(seg_len, num_samples - pos)
+            boundaries.append((pos, pos + seg_len))
+            pos += seg_len
+
+        # Merge short trailing segment into previous
+        if len(boundaries) > 1 and (boundaries[-1][1] - boundaries[-1][0]) < min_samples:
+            boundaries[-2] = (boundaries[-2][0], boundaries[-1][1])
+            boundaries.pop()
+
+        # Need at least 3 segments for meaningful content disruption
+        if len(boundaries) < 3:
+            return waveform
+
+        random.shuffle(boundaries)
+
+        # Build permutation index from shuffled segment boundaries
+        starts = torch.tensor([s for s, _ in boundaries], dtype=torch.long)
+        lengths = torch.tensor([e - s for s, e in boundaries], dtype=torch.long)
+        cum = torch.zeros(len(boundaries) + 1, dtype=torch.long)
+        cum[1:] = lengths.cumsum(0)
+
+        # Map each output position to its source position
+        seg_ids = torch.zeros(num_samples, dtype=torch.long)
+        seg_ids[cum[1:-1]] = 1
+        seg_ids = seg_ids.cumsum(0)
+
+        indices = starts[seg_ids] + (torch.arange(num_samples) - cum[seg_ids])
+        result = waveform[:, indices]
+
+        # Cosine fade at interior segment boundaries to prevent spectral artifacts.
+        if fade_samples > 0:
+            valid = lengths > 2 * fade_samples
+
+            valid_in = valid.clone()
+            valid_in[0] = False
+            valid_out = valid.clone()
+            valid_out[-1] = False
+
+            fade_in = torch.cos(torch.linspace(torch.pi, 0.0, fade_samples)) * 0.5 + 0.5
+            fade_out = torch.cos(torch.linspace(0.0, torch.pi, fade_samples)) * 0.5 + 0.5
+            offsets = torch.arange(fade_samples)
+
+            if valid_in.any():
+                in_starts = cum[:-1][valid_in]
+                in_idx = (in_starts.unsqueeze(1) + offsets).reshape(-1)
+                result[0, in_idx] *= fade_in.repeat(valid_in.sum().item())
+
+            if valid_out.any():
+                out_ends = cum[1:][valid_out]
+                out_idx = (out_ends.unsqueeze(1) - fade_samples + offsets).reshape(-1)
+                result[0, out_idx] *= fade_out.repeat(valid_out.sum().item())
+
+        return result
+
+
 class SpecAugment:
     r"""Apply the SpecAugment effect to the audio signal.
 
