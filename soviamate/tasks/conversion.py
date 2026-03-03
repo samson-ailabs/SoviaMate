@@ -121,13 +121,6 @@ class AudioCodecTask(L.LightningModule):
         target_audio_lengths: torch.Tensor,
         apply_splice_out: bool = False,
     ) -> Tuple[torch.Tensor | None, ...]:
-        # Extract speaker features from prompt waveform + clean fbank
-        speaker_features, speaker_feature_lengths = None, None
-        if self.speaker_adapter is not None:
-            speaker_features, speaker_feature_lengths = self.speaker_adapter(
-                prompt_audios, prompt_audio_lengths, prompt_fbanks, prompt_fbank_lengths
-            )
-
         # Encode source (augmented) and optionally target (clean) audios
         if self.speaker_loss is not None:
             merged_audios = torch.cat([source_audios, target_audios], dim=0)
@@ -151,7 +144,7 @@ class AudioCodecTask(L.LightningModule):
             )
             target_features, target_feature_lengths = None, None
 
-        # Text recognition on source features (optional)
+        # Auxiliary ASR for content supervision
         output_tokens, output_token_lengths = None, None
         if self.text_decoder is not None:
             asr_features = source_features
@@ -166,25 +159,33 @@ class AudioCodecTask(L.LightningModule):
                 asr_features, asr_feature_lengths
             )
 
-        # Scale reconstruction gradients for speaker disentanglement
+        # Scale down reconstruction gradients to reduce speaker leakage
         if self.recon_grad_scale < 1.0:
             source_features = (
                 source_features * self.recon_grad_scale
                 + source_features.detach() * (1 - self.recon_grad_scale)
             )
 
-        # Audio quantization
-        quantized_outputs, quantized_lengths = self.audio_quantizer(
+        # Quantize encoded features into latent representations
+        quantized_outputs, quantized_output_lengths = self.audio_quantizer(
             source_features, source_feature_lengths
         )
 
+        # Extract speaker features from prompt waveform
+        speaker_features, speaker_feature_lengths = None, None
+        if self.speaker_adapter is not None:
+            speaker_features, speaker_feature_lengths = self.speaker_adapter(
+                prompt_audios, prompt_audio_lengths, prompt_fbanks, prompt_fbank_lengths
+            )
+
         # Decode to audio with speaker conditioning
+        max_output_length = target_audio_lengths.max().item()
         output_audios, output_audio_lengths = self.audio_decoder(
             quantized_outputs,
-            quantized_lengths,
+            quantized_output_lengths,
             speaker_features,
             speaker_feature_lengths,
-            target_audio_lengths.max().item(),
+            max_output_length,
         )
 
         return (

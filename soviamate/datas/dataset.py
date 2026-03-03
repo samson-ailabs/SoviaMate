@@ -68,30 +68,27 @@ class AudioCodecDataset(Dataset):
         decoder = AudioDecoder(
             sample["audio_filepath"], sample_rate=self.SAMPLE_RATE, num_channels=1
         )
-        audio = decoder.get_all_samples().data
+        target_audio = decoder.get_all_samples().data
 
-        # Target: full utterance for reconstruction
-        target_audio = audio.clone()
-
-        # Source: perturbed for content encoding
-        source_audio = audio.clone()
+        # Source: perturbed audio for content encoding
+        source_audio = target_audio.clone()
         if hasattr(self, "source_transforms"):
             for transform in self.source_transforms:
                 source_audio = transform.apply(source_audio, self.SAMPLE_RATE)
 
-        # Fbank: full utterance for speaker embedding
-        fbank = torchaudio.compliance.kaldi.fbank(
-            audio, num_mel_bins=self.NUM_MELS, sample_frequency=self.SAMPLE_RATE
-        )
-        prompt_fbank = (fbank - fbank.mean(dim=0, keepdim=True)).t()
-
         # Prompt: augmented waveform for mel conditioning
-        prompt_audio = audio.clone()
+        prompt_audio = target_audio.clone()
         if hasattr(self, "prompt_transforms"):
             for transform in self.prompt_transforms:
                 prompt_audio = transform.apply(prompt_audio, self.SAMPLE_RATE)
 
-        # Target tokens: transcript for content supervision
+        # Fbank: full utterance for speaker embedding
+        fbank = torchaudio.compliance.kaldi.fbank(
+            target_audio, num_mel_bins=self.NUM_MELS, sample_frequency=self.SAMPLE_RATE
+        )
+        prompt_fbank = (fbank - fbank.mean(dim=0, keepdim=True)).t()
+
+        # Tokens: encode transcript for content supervision
         target_tokens = self.tokenizer.encode(sample["transcript"])
         target_tokens = torch.tensor(target_tokens, dtype=torch.long)
 
@@ -99,7 +96,7 @@ class AudioCodecDataset(Dataset):
 
     @staticmethod
     def collate_data(batch: List[Tuple[torch.Tensor, ...]]) -> Tuple[torch.Tensor, ...]:
-        r"""Pad and batch the per-sample 5-tuples into a 10-element batch."""
+        """Pad and batch the per-sample 5-tuples into an 10-element batch."""
 
         source_audios, prompt_audios, prompt_fbanks, target_audios, target_tokens = zip(
             *batch

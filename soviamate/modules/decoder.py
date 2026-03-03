@@ -73,7 +73,7 @@ class AudioDecoder(nn.Module):
         self.window_length = window_length
         self.hop_length = hop_length
 
-        self.embed_dim = d_model
+        self.latent_dim = d_model
         self.kernel_size = kernel_size
 
         self.dynamic_chunk_sizes = dynamic_chunk_sizes
@@ -96,8 +96,8 @@ class AudioDecoder(nn.Module):
 
     def forward(
         self,
-        embeddings: torch.Tensor,
-        embedding_lengths: torch.Tensor,
+        latents: torch.Tensor,
+        latent_lengths: torch.Tensor,
         prompts: torch.Tensor = None,
         prompt_lengths: torch.Tensor = None,
         max_output_length: int = None,
@@ -108,8 +108,8 @@ class AudioDecoder(nn.Module):
         uses streaming config if set, otherwise uses full context.
 
         Args:
-            embeddings (Tensor): input tensor with shape `(B, T, D)`.
-            embedding_lengths (Tensor): length of the input tensor.
+            latents (Tensor): latent representations with shape `(B, T, D)`.
+            latent_lengths (Tensor): actual lengths of latent sequences `(B,)`.
             prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
             prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
             max_output_length (int, optional): Maximum output audio length for exact reconstruction.
@@ -119,11 +119,11 @@ class AudioDecoder(nn.Module):
             Tensor: length of the output tensor.
         """
 
-        if embeddings.size(2) != self.embed_dim:
-            raise ValueError("The embedding dimension does not match.")
+        if latents.size(2) != self.latent_dim:
+            raise ValueError("The latent dimension does not match.")
 
-        xs = embeddings
-        x_lens = embedding_lengths
+        xs = latents
+        x_lens = latent_lengths
 
         if self.training:
             chunk_size, left_context = sample_chunk_config(
@@ -245,10 +245,10 @@ class AudioDecoder(nn.Module):
         conv_left_context = self.kernel_size - 1 if left_context > 0 else 0
 
         conv_cache = torch.zeros(
-            batch_size, self.embed_dim, conv_left_context, device=device
+            batch_size, self.latent_dim, conv_left_context, device=device
         )
         attn_cache = torch.zeros(
-            batch_size, left_context, self.embed_dim, device=device
+            batch_size, left_context, self.latent_dim, device=device
         )
 
         return [[conv_cache, attn_cache] for _ in range(len(self.layers))]

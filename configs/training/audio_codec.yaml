@@ -117,7 +117,9 @@ task:
     speaker_adapter:
       _target_: soviamate.modules.adapter.MemoryAugmentedAdapter
       output_dim: *d_model
-      attention_dim: 256
+      attention_dim: 512
+      num_heads: 8
+      num_blocks: 4
       sv_checkpoint: checkpoints/speaker_verification/campplus.bin
 
     discriminator:

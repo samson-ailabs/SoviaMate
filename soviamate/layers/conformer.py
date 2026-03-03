@@ -28,9 +28,7 @@ class AttentionModule(nn.Module):
         dropout (float): dropout probability.
     """
 
-    def __init__(
-        self, input_dim: int, num_heads: int, dropout: float
-    ) -> None:
+    def __init__(self, input_dim: int, num_heads: int, dropout: float) -> None:
         super().__init__()
         self.layer_norm = nn.LayerNorm(input_dim)
         self.attention = nn.MultiheadAttention(
@@ -65,7 +63,9 @@ class AttentionModule(nn.Module):
         if prompts is not None:
             # Cross-attention for prompt conditioning
             x, _ = self.attention(
-                query, prompts, prompts,
+                query=query,
+                key=prompts,
+                value=prompts,
                 key_padding_mask=prompt_mask,
                 need_weights=False,
             )
@@ -84,7 +84,9 @@ class AttentionModule(nn.Module):
             kv_mask = F.pad(padding_mask, (num_pads, 0), value=0)
 
             x, _ = self.attention(
-                query, key, value,
+                query=query,
+                key=key,
+                value=value,
                 key_padding_mask=kv_mask,
                 attn_mask=attention_mask,
                 need_weights=False,
@@ -103,9 +105,7 @@ class ConvolutionModule(nn.Module):
         dropout (float): dropout probability.
     """
 
-    def __init__(
-        self, input_dim: int, kernel_size: int, dropout: float
-    ) -> None:
+    def __init__(self, input_dim: int, kernel_size: int, dropout: float) -> None:
         super().__init__()
 
         if (kernel_size - 1) % 2 != 0:
@@ -178,9 +178,7 @@ class FeedForwardModule(nn.Module):
         dropout (float): dropout probability.
     """
 
-    def __init__(
-        self, input_dim: int, hidden_dim: int, dropout: float
-    ) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
         super().__init__()
         self.sequential = nn.Sequential(
             nn.LayerNorm(input_dim),

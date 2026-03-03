@@ -67,9 +67,8 @@ class AudioCodecBundle(nn.Module):
     """Audio Codec Bundle for production.
 
     This class bundles the audio encoder, quantizer, and decoder along with
-    optional ASR decoder. Supports speaker-controlled voice conversion via
-    CAM++ speaker adaptation. Loads from checkpoints created by
-    AudioCodecTask.export_model() for production deployment.
+    optional ASR decoder and speaker adapter for voice conversion. Loads from
+    checkpoints created by AudioCodecTask.export_model() for production deployment.
 
     Args:
         audio_encoder: The audio encoder module.
@@ -340,11 +339,9 @@ class AudioCodecBundle(nn.Module):
         return padded_fbank, fbank_lengths
 
     def _process(
-        self,
-        codec_inputs: CodecInputs,
-        return_tokens: bool = False,
+        self, codec_inputs: CodecInputs, return_tokens: bool = False
     ) -> CodecOutputs:
-        """Process audio through the codec pipeline with optional speaker adaptation.
+        """Process audio through the codec pipeline with optional speaker conditioning.
 
         Args:
             codec_inputs: Structured inputs with batched tensors.
@@ -367,22 +364,22 @@ class AudioCodecBundle(nn.Module):
             )
 
         # Encode source audio
-        source_features, source_audio_lengths = self.audio_encoder(
+        source_features, source_feature_lengths = self.audio_encoder(
             codec_inputs.source_audios, codec_inputs.source_audio_lengths
         )
 
-        # ASR decoding (optional): use source features only
+        # ASR decoding (optional)
         output_tokens = None
         token_lengths = None
 
         if return_tokens:
             output_tokens, token_lengths = self.text_decoder(
-                source_features, source_audio_lengths
+                source_features, source_feature_lengths
             )
 
-        # Quantize with FSQ
+        # Quantize
         quantized_outputs, quantized_lengths = self.audio_quantizer(
-            source_features, source_audio_lengths
+            source_features, source_feature_lengths
         )
 
         # Extract speaker features from prompt (optional)

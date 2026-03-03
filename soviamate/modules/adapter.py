@@ -148,13 +148,13 @@ class MemoryAugmentedAdapter(nn.Module):
 
     Args:
         output_dim (int): Output dimension for decoder cross-attention.
-        attention_dim (int): Internal dimension for self-attention blocks. Defaults to 256.
+        attention_dim (int): Internal dimension for self-attention blocks. Defaults to 512.
         n_mels (int): Number of mel filterbank channels. Defaults to 80.
         sample_rate (int): Audio sample rate in Hz. Defaults to 16000.
         sv_checkpoint (str): Path to pretrained CAM++ checkpoint.
         sv_embedding_size (int): CAM++ output embedding dimension. Defaults to 192.
-        num_heads (int): Number of attention heads. Defaults to 4.
-        num_blocks (int): Number of self-attention blocks. Defaults to 2.
+        num_heads (int): Number of attention heads. Defaults to 8.
+        num_blocks (int): Number of self-attention blocks. Defaults to 4.
         kernel_size (int): Kernel size for Conv1d layers. Defaults to 5.
         dropout (float): Dropout rate. Defaults to 0.1.
     """
@@ -162,13 +162,13 @@ class MemoryAugmentedAdapter(nn.Module):
     def __init__(
         self,
         output_dim: int,
-        attention_dim: int = 256,
+        attention_dim: int = 512,
         n_mels: int = 80,
         sample_rate: int = 16000,
         sv_checkpoint: str = "",
         sv_embedding_size: int = 192,
-        num_heads: int = 4,
-        num_blocks: int = 2,
+        num_heads: int = 8,
+        num_blocks: int = 4,
         kernel_size: int = 5,
         dropout: float = 0.1,
     ):

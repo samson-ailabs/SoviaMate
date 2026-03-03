@@ -95,11 +95,7 @@ class AudioEncoder(nn.Module):
         )
 
     def forward(
-        self,
-        waveforms: torch.Tensor,
-        waveform_lengths: torch.Tensor,
-        prompts: torch.Tensor = None,
-        prompt_lengths: torch.Tensor = None,
+        self, waveforms: torch.Tensor, waveform_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass of the audio encoder.
 
@@ -108,9 +104,7 @@ class AudioEncoder(nn.Module):
 
         Args:
             waveforms (Tensor): input tensor with shape `(B, T, 1)`.
-            lengths (Tensor): length of the input tensor.
-            prompts (Tensor, optional): prompt features with shape `(B, T_prompt, D_prompt)`.
-            prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
+            waveform_lengths (Tensor): length of the input tensor.
 
         Returns:
             Tensor: output tensor with shape `(B, T // window_size, D)`.
@@ -140,34 +134,21 @@ class AudioEncoder(nn.Module):
 
         zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
 
-        prompt_mask = None
-        if prompts is not None:
-            prompt_mask = make_padding_mask(prompt_lengths)
-
         for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
-            xs, _, _ = layer(
-                xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
-            )
+            xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
 
         return xs, x_lens
 
     @torch.jit.export
     def infer(
-        self,
-        segments: torch.Tensor,
-        caches: List[List[torch.Tensor]] = None,
-        prompts: torch.Tensor = None,
-        prompt_lengths: torch.Tensor = None,
+        self, segments: torch.Tensor, caches: List[List[torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
         r"""Inference for streaming audio input.
 
         Args:
-            segment (Tensor): input tensor with shape `(B, chunk_size, 1)`.
+            segments (Tensor): input tensor with shape `(B, chunk_size, 1)`.
             caches (List[List[Tensor]]): list of lists of tensors representing
                 internal state for each convolution and attention module.
-            prompts (Tensor, optional): pre-computed prompt features with shape `(B, T, D)`.
-                Should be computed once and reused for all chunks.
-            prompt_lengths (Tensor, optional): actual lengths of prompts with shape `(B,)`.
 
         Returns:
             Tuple[Tensor, List[List[Tensor]]]:
@@ -206,14 +187,10 @@ class AudioEncoder(nn.Module):
             x_lens, self.streaming_chunk_size, self.streaming_left_context
         )
 
-        prompt_mask = None
-        if prompts is not None:
-            prompt_mask = make_padding_mask(prompt_lengths)
-
         new_caches = []
         for layer, (conv_cache, attn_cache) in zip(self.layers, caches):
             xs, conv_cache, attn_cache = layer(
-                xs, conv_mask, attn_mask, conv_cache, attn_cache, prompts, prompt_mask
+                xs, conv_mask, attn_mask, conv_cache, attn_cache
             )
             new_caches.append([conv_cache, attn_cache])
 
