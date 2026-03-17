@@ -28,7 +28,7 @@ task:
             formant_shift: 1.4
             pitch_shift: 2.0
             pitch_range: 1.5
-            probability: 1.0
+            probability: 0.3
 
         prompt:
           trimmer:
@@ -52,13 +52,12 @@ task:
       tokenizer: *tokenizer
 
     loader:
-      batch_size: 16
+      batch_size: 24
       num_workers: 8
       pin_memory: true
 
   model:
     d_model: &d_model 1024
-    recon_grad_scale: 0.05
 
     frame_stacking: &frame_stacking 2
     window_length: &window_length 800
@@ -111,7 +110,7 @@ task:
     audio_quantizer:
       _target_: soviamate.modules.quantizer.FiniteScalarQuantizer
       input_dim: *d_model
-      fsq_levels: [16, 16, 16, 16, 16, 16, 16, 16]
+      fsq_levels: [3, 3, 3, 3, 3, 3, 3, 3]
       noise_dropout: 0.5
 
     speaker_adapter:
@@ -153,7 +152,7 @@ task:
     #   variance_gamma: 1.0
 
   optim:
-    total_steps: &total_steps 900000
+    total_steps: &total_steps 1000000
     pct_start: &pct_start 0.01
 
     generator:
@@ -211,5 +210,5 @@ trainer:
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true
-  max_epochs: 6
+  max_epochs: 10
   val_check_interval: 50000

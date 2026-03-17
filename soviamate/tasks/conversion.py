@@ -80,9 +80,6 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.speaker_loss = None
 
-        # Gradient scaling for speaker disentanglement (0.0=stop-grad, 1.0=normal)
-        self.recon_grad_scale = getattr(model, "recon_grad_scale", 1.0)
-
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
             self.hparams.data.trainset,
@@ -157,13 +154,6 @@ class AudioCodecTask(L.LightningModule):
 
             output_tokens, output_token_lengths = self.text_decoder(
                 asr_features, asr_feature_lengths
-            )
-
-        # Scale down reconstruction gradients to reduce speaker leakage
-        if self.recon_grad_scale < 1.0:
-            source_features = (
-                source_features * self.recon_grad_scale
-                + source_features.detach() * (1 - self.recon_grad_scale)
             )
 
         # Quantize encoded features into latent representations
@@ -290,9 +280,7 @@ class AudioCodecTask(L.LightningModule):
                 target_feature_lengths,
             )
 
-        train_loss = (
-            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.5 * speaker_loss
-        )
+        train_loss = 2.0 * audio_loss + gen_loss + text_loss + speaker_loss
         self.manual_backward(train_loss)
 
         gen_optim.step()
@@ -381,9 +369,7 @@ class AudioCodecTask(L.LightningModule):
                 target_feature_lengths,
             )
 
-        val_loss = (
-            2.0 * audio_loss + 1.0 * gen_loss + 0.5 * text_loss + 0.5 * speaker_loss
-        )
+        val_loss = 2.0 * audio_loss + gen_loss + text_loss + speaker_loss
 
         log_dict = {"val_audio_loss": audio_loss, "val_gen_loss": gen_loss}
 
