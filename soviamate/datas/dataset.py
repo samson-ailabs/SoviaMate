@@ -14,13 +14,13 @@
 
 """Dataset modules for preprocessing and augmenting speech data"""
 
+import base64
 from typing import List, Tuple
 
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 import torch
-import torchaudio
 from torch.utils.data import Dataset
 from torchcodec.decoders import AudioDecoder
 
@@ -32,12 +32,9 @@ class AudioCodecDataset(Dataset):
 
     Args:
         filepaths: Metadata filepaths (one JSONL per split).
-        tokenizer: Tokenizer configuration.
-        transforms: ``source`` and ``prompt`` transform configs.
+        tokenizer: Tokenizer configs for encoding transcripts into tokens.
+        transforms: Optional audio transforms for perturbing source audio.
     """
-
-    SAMPLE_RATE: int = 16000
-    NUM_MELS: int = 80
 
     def __init__(
         self, filepaths: List[str], tokenizer: DictConfig, transforms: DictConfig = None
@@ -47,14 +44,9 @@ class AudioCodecDataset(Dataset):
         self.dataset = load_dataset(filepaths)
         self.tokenizer = instantiate(tokenizer)
 
-        if transforms and transforms.get("source") is not None:
-            self.source_transforms = [
-                instantiate(transform) for transform in transforms.source.values()
-            ]
-
-        if transforms and transforms.get("prompt") is not None:
-            self.prompt_transforms = [
-                instantiate(transform) for transform in transforms.prompt.values()
+        if transforms is not None:
+            self.augmentations = [
+                instantiate(transform) for transform in transforms.values()
             ]
 
     def __len__(self):
@@ -62,50 +54,40 @@ class AudioCodecDataset(Dataset):
 
     def __getitem__(
         self, idx: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         sample = self.dataset[idx]
 
         decoder = AudioDecoder(
-            sample["audio_filepath"], sample_rate=self.SAMPLE_RATE, num_channels=1
+            sample["audio_filepath"], sample_rate=16000, num_channels=1
         )
+
         target_audio = decoder.get_all_samples().data
+        sample_rate = decoder.metadata.sample_rate
 
-        # Source: perturbed audio for content encoding
+        # Augment source audio for content encoding
         source_audio = target_audio.clone()
-        if hasattr(self, "source_transforms"):
-            for transform in self.source_transforms:
-                source_audio = transform.apply(source_audio, self.SAMPLE_RATE)
+        if hasattr(self, "augmentations"):
+            for transform in self.augmentations:
+                source_audio = transform.apply(source_audio, sample_rate)
 
-        # Prompt: augmented waveform for mel conditioning
-        prompt_audio = target_audio.clone()
-        if hasattr(self, "prompt_transforms"):
-            for transform in self.prompt_transforms:
-                prompt_audio = transform.apply(prompt_audio, self.SAMPLE_RATE)
+        # Decode speaker embedding from base64-encoded float32
+        speaker_embedding = bytearray(base64.b64decode(sample["speaker_embedding"]))
+        speaker_embedding = torch.frombuffer(speaker_embedding, dtype=torch.float32)
 
-        # Fbank: full utterance for speaker embedding
-        fbank = torchaudio.compliance.kaldi.fbank(
-            target_audio, num_mel_bins=self.NUM_MELS, sample_frequency=self.SAMPLE_RATE
-        )
-        prompt_fbank = (fbank - fbank.mean(dim=0, keepdim=True)).t()
-
-        # Tokens: encode transcript for content supervision
+        # Encode transcript for text supervision
         target_tokens = self.tokenizer.encode(sample["transcript"])
         target_tokens = torch.tensor(target_tokens, dtype=torch.long)
 
-        return source_audio, prompt_audio, prompt_fbank, target_audio, target_tokens
+        return source_audio, speaker_embedding, target_audio, target_tokens
 
     @staticmethod
     def collate_data(batch: List[Tuple[torch.Tensor, ...]]) -> Tuple[torch.Tensor, ...]:
-        """Pad and batch the per-sample 5-tuples into an 10-element batch."""
+        """Pad and batch the per-sample 4-tuples into a 7-element batch."""
 
-        source_audios, prompt_audios, prompt_fbanks, target_audios, target_tokens = zip(
-            *batch
-        )
+        source_audios, speaker_embeddings, target_audios, target_tokens = zip(*batch)
 
         source_audios, source_audio_lengths = stack_batches(source_audios)
-
-        prompt_audios, prompt_audio_lengths = stack_batches(prompt_audios)
-        prompt_fbanks, prompt_fbank_lengths = stack_batches(prompt_fbanks)
+        speaker_embeddings = torch.stack(speaker_embeddings)
 
         target_audios, target_audio_lengths = stack_batches(target_audios)
         target_tokens, target_token_lengths = stack_batches(target_tokens)
@@ -113,10 +95,7 @@ class AudioCodecDataset(Dataset):
         return (
             source_audios,
             source_audio_lengths,
-            prompt_audios,
-            prompt_audio_lengths,
-            prompt_fbanks,
-            prompt_fbank_lengths,
+            speaker_embeddings,
             target_audios,
             target_audio_lengths,
             target_tokens,
