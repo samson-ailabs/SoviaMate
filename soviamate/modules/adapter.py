@@ -14,13 +14,14 @@
 
 """Adapter modules for extracting conditioning features."""
 
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
 import torchaudio
 
 from soviamate.layers.campplus import CAMPPlus
+from soviamate.layers.eres2netv2 import ERes2NetV2
 from soviamate.utils.helper import make_padding_mask
 
 
@@ -247,11 +248,74 @@ class MemoryAugmentedAdapter(nn.Module):
 
         # Combine mel + SV → timbre module
         sv_expanded = spk_emb.unsqueeze(2).expand(-1, -1, mel_spec.size(2))
-        combined = torch.cat([mel_spec, sv_expanded], dim=1)
+        features = torch.cat([mel_spec, sv_expanded], dim=1)
 
-        lengths = prompt_audio_lengths // self.hop_length + 1
-        lengths = torch.clamp(lengths, min=1, max=mel_spec.size(2))
+        feature_lengths = prompt_audio_lengths // self.hop_length + 1
+        feature_lengths = torch.clamp(feature_lengths, min=1, max=mel_spec.size(2))
 
-        features, lengths = self.voice_print(combined, lengths)
+        # Memory-augmented refinement to produce final speaker features
+        outputs, output_lengths = self.voice_print(features, feature_lengths)
 
-        return features, lengths
+        return outputs, output_lengths
+
+
+class GlobalSpeakerAdapter(nn.Module):
+    """Extract utterance-level speaker embedding via a frozen speaker
+    verification model for AdaLN conditioning in the decoder.
+
+    Args:
+        n_mels (int): Number of mel filterbank channels. Defaults to 80.
+        encoder_type (Literal["campplus", "eres2net"]): Speaker encoder type.
+        sv_checkpoint (str): Path to pretrained speaker encoder checkpoint.
+        sv_embedding_size (int): Output embedding dimension. Defaults to 192.
+    """
+
+    def __init__(
+        self,
+        n_mels: int = 80,
+        encoder_type: Literal["campplus", "eres2net"] = "campplus",
+        sv_checkpoint: str = "",
+        sv_embedding_size: int = 192,
+    ):
+        super().__init__()
+
+        self.embedding_size = sv_embedding_size
+
+        if encoder_type == "eres2net":
+            self.sv_model = ERes2NetV2(
+                feat_dim=n_mels, embedding_size=sv_embedding_size
+            )
+        elif encoder_type == "campplus":
+            self.sv_model = CAMPPlus(feat_dim=n_mels, embedding_size=sv_embedding_size)
+        else:
+            raise ValueError(f"Unsupported encoder type: {encoder_type}")
+
+        if sv_checkpoint:
+            state_dict = torch.load(
+                sv_checkpoint, map_location="cpu", weights_only=True
+            )
+            self.sv_model.load_state_dict(state_dict)
+
+        self.sv_model.eval()
+        self.sv_model.requires_grad_(False)
+
+    def train(self, mode: bool = True) -> "GlobalSpeakerAdapter":
+        """Override to keep sv_model in eval mode (frozen BatchNorm)."""
+        super().train(mode)
+        self.sv_model.eval()
+        return self
+
+    @torch.no_grad()
+    def forward(
+        self, prompt_fbanks: torch.Tensor, prompt_fbank_lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """Extract utterance-level speaker embedding from fbank features.
+
+        Args:
+            prompt_fbanks (Tensor): Precomputed fbank of shape (B, T, n_mels).
+            prompt_fbank_lengths (Tensor): Fbank feature lengths of shape (B,).
+
+        Returns:
+            Tensor: Speaker embedding of shape (B, embedding_size).
+        """
+        return self.sv_model(prompt_fbanks.transpose(1, 2), prompt_fbank_lengths)

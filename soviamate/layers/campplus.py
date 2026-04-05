@@ -14,8 +14,9 @@
 
 """CAM++ speaker embedding extractor.
 
-Weight-compatible with pretrained checkpoints from 3D-Speaker
-(https://github.com/modelscope/3D-Speaker).
+This module provides a clean implementation of CAM++ architecture for
+speaker verification. The implementation is weight-compatible with pretrained
+checkpoints from 3D-Speaker (https://github.com/modelscope/3D-Speaker).
 """
 
 from collections import OrderedDict
