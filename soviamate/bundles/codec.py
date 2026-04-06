@@ -34,16 +34,12 @@ class CodecInputs:
         source_audio_lengths: Length of each audio (B,).
         prompt_audios: Optional speaker prompts (B, T_prompt, 1).
         prompt_audio_lengths: Optional prompt lengths (B,).
-        prompt_fbanks: Optional fbank features (B, T', n_mels).
-        prompt_fbank_lengths: Optional fbank lengths (B,).
     """
 
     source_audios: torch.Tensor
     source_audio_lengths: torch.Tensor
     prompt_audios: Optional[torch.Tensor] = None
     prompt_audio_lengths: Optional[torch.Tensor] = None
-    prompt_fbanks: Optional[torch.Tensor] = None
-    prompt_fbank_lengths: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -73,9 +69,9 @@ class AudioCodecBundle(nn.Module):
     Args:
         audio_encoder: The audio encoder module.
         audio_quantizer: The audio quantizer module.
-        audio_decoder: The audio decoder module with cross-attention.
+        audio_decoder: The audio decoder module with speaker conditioning.
         text_decoder: Optional ASR text decoder module.
-        speaker_adapter: Optional speaker adapter module for voice conversion.
+        speaker_adapter: Optional frozen speaker encoder for voice conversion.
         device: Device to place the model on ('cpu', 'cuda', 'cuda:0', etc.).
     """
 
@@ -151,7 +147,6 @@ class AudioCodecBundle(nn.Module):
         audio_quantizer_weights = model_weights.get("audio_quantizer", {})
         audio_decoder_weights = model_weights.get("audio_decoder", {})
         text_decoder_weights = model_weights.get("text_decoder", {})
-        speaker_adapter_weights = model_weights.get("speaker_adapter", {})
 
         # Instantiate components from hyperparameters
         if "hyper_parameters" not in checkpoint:
@@ -171,8 +166,9 @@ class AudioCodecBundle(nn.Module):
         if "text_decoder" in model_config and text_decoder_weights:
             text_decoder = instantiate(model_config["text_decoder"])
 
+        # Speaker adapter for inference only (frozen, not trained)
         speaker_adapter = None
-        if "speaker_adapter" in model_config and speaker_adapter_weights:
+        if "speaker_adapter" in model_config:
             speaker_adapter = instantiate(model_config["speaker_adapter"])
 
         # Load model weights
@@ -182,9 +178,6 @@ class AudioCodecBundle(nn.Module):
 
         if text_decoder is not None and text_decoder_weights:
             text_decoder.load_state_dict(text_decoder_weights)
-
-        if speaker_adapter is not None and speaker_adapter_weights:
-            speaker_adapter.load_state_dict(speaker_adapter_weights)
 
         # Build bundle
         bundle = cls(
@@ -281,22 +274,11 @@ class AudioCodecBundle(nn.Module):
                     (batch_size,), seq_length, dtype=torch.long, device=device
                 )
 
-        # Compute fbank features for speaker adapter
-        prompt_fbanks = None
-        prompt_fbank_lengths = None
-
-        if prompt_audios is not None and self.speaker_adapter is not None:
-            prompt_fbanks, prompt_fbank_lengths = self._compute_fbank(
-                prompt_audios, prompt_audio_lengths
-            )
-
         return CodecInputs(
             source_audios=source_audios,
             source_audio_lengths=source_audio_lengths,
             prompt_audios=prompt_audios,
             prompt_audio_lengths=prompt_audio_lengths,
-            prompt_fbanks=prompt_fbanks,
-            prompt_fbank_lengths=prompt_fbank_lengths,
         )
 
     def _compute_fbank(
@@ -382,16 +364,15 @@ class AudioCodecBundle(nn.Module):
             source_features, source_feature_lengths
         )
 
-        # Extract speaker features from prompt (optional)
-        speaker_features = None
-        speaker_feature_lengths = None
+        # Extract speaker embedding from prompt (optional)
+        speaker_embeddings = None
 
         if self.speaker_adapter is not None and codec_inputs.prompt_audios is not None:
-            speaker_features, speaker_feature_lengths = self.speaker_adapter(
-                codec_inputs.prompt_audios,
-                codec_inputs.prompt_audio_lengths,
-                codec_inputs.prompt_fbanks,
-                codec_inputs.prompt_fbank_lengths,
+            prompt_fbanks, prompt_fbank_lengths = self._compute_fbank(
+                codec_inputs.prompt_audios, codec_inputs.prompt_audio_lengths
+            )
+            speaker_embeddings = self.speaker_adapter(
+                prompt_fbanks, prompt_fbank_lengths
             )
 
         # Calculate maximum output length for exact reconstruction
@@ -401,9 +382,8 @@ class AudioCodecBundle(nn.Module):
         output_audios, output_lengths = self.audio_decoder(
             quantized_outputs,
             quantized_lengths,
-            speaker_features,
-            speaker_feature_lengths,
-            max_output_length,
+            speaker_emb=speaker_embeddings,
+            max_output_length=max_output_length,
         )
 
         return CodecOutputs(
@@ -414,9 +394,7 @@ class AudioCodecBundle(nn.Module):
         )
 
     def _unpack_outputs(
-        self,
-        codec_outputs: CodecOutputs,
-        as_list: bool = False,
+        self, codec_outputs: CodecOutputs, as_list: bool = False
     ) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
         Optional[Union[torch.Tensor, List[torch.Tensor]]],

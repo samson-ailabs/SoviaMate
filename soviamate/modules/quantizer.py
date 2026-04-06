@@ -64,17 +64,9 @@ class FiniteScalarQuantizer(nn.Module):
             Tensor: quantized features, shape `(B, T, D)`.
             Tensor: lengths of features, shape `(B,)`.
         """
-
-        # Project directly to FSQ dimension
         z_fsq_input = self.pre_quant(features)
-
-        # FSQ quantization
         z_quantized = self._quantize_vectors(z_fsq_input)
-
-        # Output Projection
-        quantized_features = self.post_quant(z_quantized)
-
-        return quantized_features, lengths
+        return self.post_quant(z_quantized), lengths
 
     @torch.autocast(device_type="cuda", enabled=False)
     def _quantize_vectors(self, x: torch.Tensor) -> torch.Tensor:
@@ -99,20 +91,14 @@ class FiniteScalarQuantizer(nn.Module):
         """Encode input features to discrete indices.
 
         Args:
-            inputs (Tensor): input tensor, shape `(B, T, D)`.
+            inputs (Tensor): input tensor, shape ``(B, T, D)``.
 
         Returns:
-            Tensor: discrete indices, shape `(B, T, 1)`.
+            Tensor: discrete indices, shape ``(B, T)``.
         """
-
-        # Direct FSQ encoding
         z_fsq_input = self.pre_quant(inputs)
-
-        # Convert to indices
         z_quantized = self._quantize_vectors(z_fsq_input)
-        indices = self._codes_to_indices(z_quantized)
-
-        return indices
+        return self._codes_to_indices(z_quantized)
 
     @torch.jit.export
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
@@ -124,12 +110,8 @@ class FiniteScalarQuantizer(nn.Module):
         Returns:
             Tensor: reconstructed features, shape `(B, T, D)`.
         """
-
-        # Convert indices to codes
         codes = self._indices_to_codes(indices)
-        outputs = self.post_quant(codes)
-
-        return outputs
+        return self.post_quant(codes)
 
     def _straight_through_gradient(self, z: torch.Tensor) -> torch.Tensor:
         return z + (z.round() - z).detach()

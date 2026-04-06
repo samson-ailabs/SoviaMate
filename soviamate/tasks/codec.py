@@ -16,6 +16,7 @@
 
 import itertools
 import os
+import random
 from typing import Tuple
 
 import lightning as L
@@ -50,6 +51,10 @@ class AudioCodecTask(L.LightningModule):
         self.audio_loss = instantiate(model.audio_loss)
         self.adv_loss = instantiate(model.adv_loss)
 
+        # Scale reconstruction gradient flowing back to encoder+quantizer
+        # to reduce speaker leakage. Text loss gradient is unaffected.
+        self.recon_grad_scale = model.get("recon_grad_scale", 0.2)
+
         # SpliceOut augmentation for ASR decoder
         if hasattr(model, "splice_out"):
             self.splice_out = instantiate(model.splice_out)
@@ -67,12 +72,6 @@ class AudioCodecTask(L.LightningModule):
             self.text_loss = instantiate(model.text_loss)
         else:
             self.text_loss = None
-
-        # Speaker adapter for speaker adaptation
-        if hasattr(model, "speaker_adapter"):
-            self.speaker_adapter = instantiate(model.speaker_adapter)
-        else:
-            self.speaker_adapter = None
 
         # Speaker contrastive loss for speaker disentanglement
         if hasattr(model, "speaker_loss"):
@@ -110,10 +109,7 @@ class AudioCodecTask(L.LightningModule):
         self,
         source_audios: torch.Tensor,
         source_audio_lengths: torch.Tensor,
-        prompt_audios: torch.Tensor,
-        prompt_audio_lengths: torch.Tensor,
-        prompt_fbanks: torch.Tensor,
-        prompt_fbank_lengths: torch.Tensor,
+        speaker_embeddings: torch.Tensor,
         target_audios: torch.Tensor,
         target_audio_lengths: torch.Tensor,
         apply_splice_out: bool = False,
@@ -141,10 +137,19 @@ class AudioCodecTask(L.LightningModule):
             )
             target_features, target_feature_lengths = None, None
 
-        # Auxiliary ASR for content supervision
+        # Quantize encoded features into latent representations
+        quantized_outputs, quantized_output_lengths = self.audio_quantizer(
+            source_features, source_feature_lengths
+        )
+
+        # Auxiliary ASR: 50% post-quant (trains quantizer to preserve content),
+        # 50% pre-quant (keeps text decoder compatible with streaming inference)
         output_tokens, output_token_lengths = None, None
         if self.text_decoder is not None:
-            asr_features = source_features
+            if self.training and random.random() < 0.5:
+                asr_features = quantized_outputs
+            else:
+                asr_features = source_features
             asr_feature_lengths = source_feature_lengths
 
             if apply_splice_out and self.splice_out is not None:
@@ -156,25 +161,18 @@ class AudioCodecTask(L.LightningModule):
                 asr_features, asr_feature_lengths
             )
 
-        # Quantize encoded features into latent representations
-        quantized_outputs, quantized_output_lengths = self.audio_quantizer(
-            source_features, source_feature_lengths
+        # Scale reconstruction gradient to reduce speaker leakage
+        quantized_outputs = (
+            quantized_outputs * self.recon_grad_scale
+            + quantized_outputs.detach() * (1 - self.recon_grad_scale)
         )
-
-        # Extract speaker features from prompt waveform
-        speaker_features, speaker_feature_lengths = None, None
-        if self.speaker_adapter is not None:
-            speaker_features, speaker_feature_lengths = self.speaker_adapter(
-                prompt_audios, prompt_audio_lengths, prompt_fbanks, prompt_fbank_lengths
-            )
 
         # Decode to audio with speaker conditioning
         max_output_length = target_audio_lengths.max().item()
         output_audios, output_audio_lengths = self.audio_decoder(
             quantized_outputs,
             quantized_output_lengths,
-            speaker_features,
-            speaker_feature_lengths,
+            speaker_embeddings,
             max_output_length,
         )
 
@@ -193,10 +191,7 @@ class AudioCodecTask(L.LightningModule):
         (
             source_audios,
             source_audio_lengths,
-            prompt_audios,
-            prompt_audio_lengths,
-            prompt_fbanks,
-            prompt_fbank_lengths,
+            speaker_embeddings,
             target_audios,
             target_audio_lengths,
             target_tokens,
@@ -215,10 +210,7 @@ class AudioCodecTask(L.LightningModule):
         ) = self.forward(
             source_audios,
             source_audio_lengths,
-            prompt_audios,
-            prompt_audio_lengths,
-            prompt_fbanks,
-            prompt_fbank_lengths,
+            speaker_embeddings,
             target_audios,
             target_audio_lengths,
             apply_splice_out=True,
@@ -280,7 +272,7 @@ class AudioCodecTask(L.LightningModule):
                 target_feature_lengths,
             )
 
-        train_loss = 2.0 * audio_loss + gen_loss + text_loss + speaker_loss
+        train_loss = 2.0 * audio_loss + gen_loss + 3.0 * text_loss + speaker_loss
         self.manual_backward(train_loss)
 
         gen_optim.step()
@@ -308,10 +300,7 @@ class AudioCodecTask(L.LightningModule):
         (
             source_audios,
             source_audio_lengths,
-            prompt_audios,
-            prompt_audio_lengths,
-            prompt_fbanks,
-            prompt_fbank_lengths,
+            speaker_embeddings,
             target_audios,
             target_audio_lengths,
             target_tokens,
@@ -330,10 +319,7 @@ class AudioCodecTask(L.LightningModule):
         ) = self.forward(
             source_audios,
             source_audio_lengths,
-            prompt_audios,
-            prompt_audio_lengths,
-            prompt_fbanks,
-            prompt_fbank_lengths,
+            speaker_embeddings,
             target_audios,
             target_audio_lengths,
             apply_splice_out=False,
@@ -369,7 +355,8 @@ class AudioCodecTask(L.LightningModule):
                 target_feature_lengths,
             )
 
-        val_loss = 2.0 * audio_loss + gen_loss + text_loss + speaker_loss
+        val_loss = 2.0 * audio_loss + gen_loss + 3.0 * text_loss + speaker_loss
+        self.log("val_loss", val_loss, sync_dist=True, prog_bar=True)
 
         log_dict = {"val_audio_loss": audio_loss, "val_gen_loss": gen_loss}
 
@@ -380,7 +367,6 @@ class AudioCodecTask(L.LightningModule):
             log_dict["val_speaker_loss"] = speaker_loss
 
         self.log_dict(log_dict, sync_dist=True)
-        self.log("val_loss", val_loss, sync_dist=True, prog_bar=True)
 
     def _get_random_segments(
         self,
@@ -442,10 +428,6 @@ class AudioCodecTask(L.LightningModule):
         if self.text_loss is not None:
             gen_param_groups.append(self.text_loss.parameters())
 
-        # Add speaker adaptation parameters if available
-        if self.speaker_adapter is not None:
-            gen_param_groups.append(self.speaker_adapter.parameters())
-
         if self.speaker_loss is not None:
             gen_param_groups.append(self.speaker_loss.parameters())
 
@@ -465,8 +447,7 @@ class AudioCodecTask(L.LightningModule):
     def export_model(self, filepath: str) -> None:
         """Export model for production using AudioCodecBundle.
 
-        This method saves only the production-relevant components (encoder, quantizer,
-        decoder, and optional text_decoder/speaker_adapter) along with hyperparameters.
+        This method saves only the production-relevant components along with hyperparameters.
         Training-only components (discriminator, losses, splice_out) are excluded.
 
         Args:
@@ -483,12 +464,9 @@ class AudioCodecTask(L.LightningModule):
             "audio_decoder": self.audio_decoder.state_dict(),
         }
 
-        # Optional components for ASR and speaker adaptation
+        # Optional components for text decoding
         if self.text_decoder is not None:
             model_weights["text_decoder"] = self.text_decoder.state_dict()
-
-        if self.speaker_adapter is not None:
-            model_weights["speaker_adapter"] = self.speaker_adapter.state_dict()
 
         # Convert hyperparameters to plain dict for portable checkpoint
         hyper_parameters = {

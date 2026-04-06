@@ -14,6 +14,6 @@
 
 """Production bundles for audio codec and related tasks."""
 
-from soviamate.bundles.conversion import AudioCodecBundle, CodecInputs, CodecOutputs
+from soviamate.bundles.codec import AudioCodecBundle, CodecInputs, CodecOutputs
 
 __all__ = ["AudioCodecBundle", "CodecInputs", "CodecOutputs"]
