@@ -24,6 +24,8 @@ import torchaudio
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 
+from soviamate.datas.tokenizer import SentencePieceTokenizer
+
 
 @dataclass
 class CodecInputs:
@@ -72,6 +74,7 @@ class AudioCodecBundle(nn.Module):
         audio_decoder: The audio decoder module with speaker conditioning.
         text_decoder: Optional ASR text decoder module.
         speaker_adapter: Optional frozen speaker encoder for voice conversion.
+        tokenizer: Optional tokenizer for decoding token indices to text.
         device: Device to place the model on ('cpu', 'cuda', 'cuda:0', etc.).
     """
 
@@ -82,6 +85,7 @@ class AudioCodecBundle(nn.Module):
         audio_decoder: nn.Module,
         text_decoder: Optional[nn.Module] = None,
         speaker_adapter: Optional[nn.Module] = None,
+        tokenizer: Optional[SentencePieceTokenizer] = None,
         device: Optional[Union[str, torch.device]] = None,
     ):
         super().__init__()
@@ -93,6 +97,7 @@ class AudioCodecBundle(nn.Module):
         self.audio_quantizer = audio_quantizer
         self.audio_decoder = audio_decoder
         self.text_decoder = text_decoder
+        self.tokenizer = tokenizer
         self.speaker_adapter = speaker_adapter
 
         if device is not None:
@@ -179,6 +184,12 @@ class AudioCodecBundle(nn.Module):
         if text_decoder is not None and text_decoder_weights:
             text_decoder.load_state_dict(text_decoder_weights)
 
+        # Tokenizer for text decoding
+        tokenizer = None
+        data_config = hparams.get("data", {})
+        if "tokenizer" in data_config and text_decoder is not None:
+            tokenizer = instantiate(data_config["tokenizer"])
+
         # Build bundle
         bundle = cls(
             audio_encoder=audio_encoder,
@@ -186,6 +197,7 @@ class AudioCodecBundle(nn.Module):
             audio_decoder=audio_decoder,
             text_decoder=text_decoder,
             speaker_adapter=speaker_adapter,
+            tokenizer=tokenizer,
             device=device,
         )
 
@@ -320,6 +332,33 @@ class AudioCodecBundle(nn.Module):
         fbank_lengths = torch.tensor(fbank_lengths, dtype=torch.long, device=device)
         return padded_fbank, fbank_lengths
 
+    @staticmethod
+    def _ctc_collapse(
+        tokens: torch.Tensor, blank: int = 0, last_token: int = -1
+    ) -> List[int]:
+        """Collapse CTC output by removing consecutive duplicates and blanks.
+
+        Args:
+            tokens (Tensor): Token indices (T,).
+            blank (int): Blank token index. Default: 0.
+            last_token (int): Last token from previous chunk for cross-chunk
+                deduplication. Use -1 (default) for full-context decoding.
+
+        Returns:
+            List[int]: Collapsed token indices.
+        """
+        if last_token >= 0:
+            prefix = torch.tensor([last_token], device=tokens.device)
+            tokens = torch.cat([prefix, tokens])
+
+        unique = torch.unique_consecutive(tokens)
+        collapsed = unique[(unique != blank) & (unique != -1)].tolist()
+
+        if last_token >= 0 and collapsed and collapsed[0] == last_token:
+            collapsed = collapsed[1:]
+
+        return collapsed
+
     def _process(
         self, codec_inputs: CodecInputs, return_tokens: bool = False
     ) -> CodecOutputs:
@@ -350,14 +389,15 @@ class AudioCodecBundle(nn.Module):
             codec_inputs.source_audios, codec_inputs.source_audio_lengths
         )
 
-        # ASR decoding (optional)
+        # ASR token decoding (optional)
         output_tokens = None
         token_lengths = None
 
         if return_tokens:
-            output_tokens, token_lengths = self.text_decoder(
+            logits, token_lengths = self.text_decoder(
                 source_features, source_feature_lengths
             )
+            output_tokens = logits.argmax(dim=-1)
 
         # Quantize
         quantized_outputs, quantized_lengths = self.audio_quantizer(
@@ -397,7 +437,7 @@ class AudioCodecBundle(nn.Module):
         self, codec_outputs: CodecOutputs, as_list: bool = False
     ) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
-        Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        Optional[Union[str, List[str]]],
     ]:
         """Unpack outputs to requested format.
 
@@ -406,23 +446,26 @@ class AudioCodecBundle(nn.Module):
             as_list: Whether to return as list.
 
         Returns:
-            Tuple of (audios, tokens). If as_list is True, returns lists of
-            tensors. If False, returns single tensors (first element).
+            Tuple of (audios, texts). If as_list is True, returns lists.
+            If False, returns first element.
         """
         audio_list = self.unpack_sequence(
             codec_outputs.audios, codec_outputs.audio_lengths
         )
 
-        token_list = None
+        text_list = None
         if codec_outputs.tokens is not None:
-            token_list = self.unpack_sequence(
-                codec_outputs.tokens, codec_outputs.token_lengths
-            )
+            text_list = []
+            for i in range(codec_outputs.tokens.size(0)):
+                tokens = self._ctc_collapse(
+                    codec_outputs.tokens[i, : codec_outputs.token_lengths[i]]
+                )
+                text_list.append(self.tokenizer.decode(tokens))
 
         if as_list:
-            return audio_list, token_list
+            return audio_list, text_list
 
-        return audio_list[0], token_list[0] if token_list else None
+        return audio_list[0], text_list[0] if text_list else None
 
     @torch.inference_mode()
     def forward(
@@ -432,7 +475,7 @@ class AudioCodecBundle(nn.Module):
         return_tokens: bool = False,
     ) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
-        Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        Optional[Union[str, List[str]]],
     ]:
         """Process audio with flexible input formats and optional speaker adaptation.
 
@@ -451,7 +494,8 @@ class AudioCodecBundle(nn.Module):
 
         Returns:
             audios: Single tensor (1, T') or list [(1, T1'), ...] matching input format.
-            tokens: Single tensor (L,) or list [(L1,), ...] if return_tokens is True, else None.
+            texts: Decoded text string or list of strings if return_tokens is True.
+                None if return_tokens is False.
 
         Examples:
             >>> # Standard codec
