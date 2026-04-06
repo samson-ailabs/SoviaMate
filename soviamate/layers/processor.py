@@ -67,10 +67,13 @@ class _FeedForwardNetwork(nn.Module):
 class SpectrogramProcessor(nn.Module):
     """STFT-based spectrogram processor with magnitude and phase streams.
 
+    Window length is fixed to ``2 * hop_length`` for streaming compatibility:
+    each STFT frame's window exactly spans two hops, so truncating the extra
+    center-padding frame in streaming loses no unique information.
+
     Args:
         frame_stacking (int): Number of frames to stack for downsampling.
-        window_length (int): Window length for STFT (n_fft).
-        hop_length (int): Hop length for STFT.
+        hop_length (int): Hop length for STFT. Window length is ``2 * hop_length``.
         output_dim (int): Output dimension after final projection.
         mag_dim (int, optional): Magnitude stream dimension. Defaults to 512.
         phase_dim (int, optional): Phase stream dimension. Defaults to 256.
@@ -81,7 +84,6 @@ class SpectrogramProcessor(nn.Module):
     def __init__(
         self,
         frame_stacking: int,
-        window_length: int,
         hop_length: int,
         output_dim: int,
         mag_dim: int = 512,
@@ -92,20 +94,17 @@ class SpectrogramProcessor(nn.Module):
         super().__init__()
 
         self.frame_stacking = frame_stacking
-        self.window_length = window_length
         self.hop_length = hop_length
-        self.mag_dim = mag_dim
-        self.phase_dim = phase_dim
-        self.phase_grad_dim = phase_grad_dim
+        self.window_length = 2 * hop_length
 
         self.specgram = TAudio.Spectrogram(
-            n_fft=window_length,
-            win_length=window_length,
-            hop_length=hop_length,
+            n_fft=self.window_length,
+            win_length=self.window_length,
+            hop_length=self.hop_length,
             power=None,
         )
 
-        n_bins = window_length // 2 + 1
+        n_bins = self.window_length // 2 + 1
         stacked_bins = n_bins * frame_stacking
 
         # Separate embeddings for each stream
@@ -221,10 +220,11 @@ class SpectrogramProcessor(nn.Module):
 class InverseSpectrogramProcessor(nn.Module):
     """iSTFT-based inverse processor for waveform reconstruction.
 
+    Window length is fixed to ``2 * hop_length`` to match SpectrogramProcessor.
+
     Args:
         frame_stacking (int): Number of frames to unstack for upsampling.
-        window_length (int): Window length for iSTFT (n_fft).
-        hop_length (int): Hop length for iSTFT.
+        hop_length (int): Hop length for iSTFT. Window length is ``2 * hop_length``.
         input_dim (int): Input feature dimension.
         mag_dim (int, optional): Magnitude branch dimension. Defaults to 512.
         phase_dim (int, optional): Phase branch dimension. Defaults to 512.
@@ -234,7 +234,6 @@ class InverseSpectrogramProcessor(nn.Module):
     def __init__(
         self,
         frame_stacking: int,
-        window_length: int,
         hop_length: int,
         input_dim: int,
         mag_dim: int = 512,
@@ -244,19 +243,17 @@ class InverseSpectrogramProcessor(nn.Module):
         super().__init__()
 
         self.frame_stacking = frame_stacking
-        self.window_length = window_length
         self.hop_length = hop_length
-        self.mag_dim = mag_dim
-        self.phase_dim = phase_dim
+        self.window_length = 2 * hop_length
 
         self.inverse_specgram = TAudio.InverseSpectrogram(
-            n_fft=window_length,
-            win_length=window_length,
-            hop_length=hop_length,
+            n_fft=self.window_length,
+            win_length=self.window_length,
+            hop_length=self.hop_length,
         )
 
-        n_bins = window_length // 2 + 1
-        stacked_bins = n_bins * frame_stacking
+        n_bins = self.window_length // 2 + 1
+        stacked_bins = n_bins * self.frame_stacking
 
         # Magnitude branch: predicts log-magnitude
         self.mag_proj_in = nn.Linear(input_dim, mag_dim)

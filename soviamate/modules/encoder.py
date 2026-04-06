@@ -17,27 +17,17 @@
 from typing import List, Tuple
 
 import torch
-import torch.nn as nn
 
-from soviamate.layers.conformer import ConformerLayer
 from soviamate.layers.processor import SpectrogramProcessor
-from soviamate.utils.helper import (
-    make_attention_mask,
-    make_padding_mask,
-    sample_chunk_config,
-)
+from soviamate.layers.streaming import StreamingConformer
 
 
-class AudioEncoder(nn.Module):
-    """Audio Encoder with streaming inference capabilities.
-
-    Uses dynamic chunk training for unified streaming and non-streaming models.
-    Uses STFT-based spectrogram extraction with frame stacking.
+class AudioEncoder(StreamingConformer):
+    """Audio Encoder with STFT feature extraction and conformer layers.
 
     Args:
         frame_stacking (int): number of spectrogram frames to stack.
-        window_length (int): window length for STFT (n_fft).
-        hop_length (int): hop length for STFT.
+        hop_length (int): hop length for STFT. Window length is ``2 * hop_length``.
         num_layers (int): number of conformer layers.
         d_model (int): embedding dimension for the conformer layers.
         ffn_dim (int): hidden dimension for the feed-forward module.
@@ -52,7 +42,6 @@ class AudioEncoder(nn.Module):
     def __init__(
         self,
         frame_stacking: int,
-        window_length: int,
         hop_length: int,
         num_layers: int,
         d_model: int,
@@ -64,38 +53,24 @@ class AudioEncoder(nn.Module):
         left_context_ratio: int = 4,
         full_context_prob: float = 0.0,
     ):
-        super().__init__()
-
-        self.streaming_chunk_size = None
-        self.streaming_left_context = None
-
-        self.frame_stacking = frame_stacking
-        self.window_length = window_length
-        self.hop_length = hop_length
-
-        self.embed_dim = d_model
-        self.kernel_size = kernel_size
-
-        self.dynamic_chunk_sizes = dynamic_chunk_sizes
-        self.left_context_ratio = left_context_ratio
-        self.full_context_prob = full_context_prob
-
-        self.extractor = SpectrogramProcessor(
-            frame_stacking=frame_stacking,
-            window_length=window_length,
-            hop_length=hop_length,
-            output_dim=d_model,
+        super().__init__(
+            num_layers=num_layers,
+            d_model=d_model,
+            ffn_dim=ffn_dim,
+            num_heads=num_heads,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dynamic_chunk_sizes=dynamic_chunk_sizes,
+            left_context_ratio=left_context_ratio,
+            full_context_prob=full_context_prob,
         )
 
-        self.layers = nn.ModuleList(
-            [
-                ConformerLayer(d_model, ffn_dim, num_heads, kernel_size, dropout)
-                for _ in range(num_layers)
-            ]
+        self.extractor = SpectrogramProcessor(
+            frame_stacking=frame_stacking, hop_length=hop_length, output_dim=d_model
         )
 
     def forward(
-        self, waveforms: torch.Tensor, waveform_lengths: torch.Tensor
+        self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward pass of the audio encoder.
 
@@ -104,131 +79,35 @@ class AudioEncoder(nn.Module):
 
         Args:
             waveforms (Tensor): input tensor with shape `(B, T, 1)`.
-            waveform_lengths (Tensor): length of the input tensor.
+            lengths (Tensor): valid lengths in samples `(B,)`.
 
         Returns:
-            Tensor: output tensor with shape `(B, T // window_size, D)`.
-            Tensor: length of the output tensor.
+            Tuple[Tensor, Tensor]: (features, lengths) with shapes
+                `(B, T', D)` and `(B,)`.
         """
-
-        if waveforms.size(2) != 1:
-            raise ValueError("The audio signal should be mono-channel.")
-
-        xs, x_lens = self.extractor(waveforms, waveform_lengths)
-
-        if self.training:
-            chunk_size, left_context = sample_chunk_config(
-                x_lens,
-                self.dynamic_chunk_sizes,
-                self.left_context_ratio,
-                self.full_context_prob,
-            )
-        elif self.streaming_chunk_size is not None:
-            chunk_size = self.streaming_chunk_size
-            left_context = self.streaming_left_context
-        else:
-            chunk_size, left_context = xs.size(1), 0
-
-        conv_mask = make_padding_mask(x_lens)
-        attn_mask = make_attention_mask(x_lens, chunk_size, left_context)
-
-        zero_caches = self._initiate_states(xs.size(0), left_context, xs.device)
-
-        for layer, (conv_cache, attn_cache) in zip(self.layers, zero_caches):
-            xs, _, _ = layer(xs, conv_mask, attn_mask, conv_cache, attn_cache)
-
-        return xs, x_lens
+        xs, x_lens = self.extractor(waveforms, lengths)
+        return self._forward_layers(xs, x_lens)
 
     @torch.jit.export
     def infer(
         self, segments: torch.Tensor, caches: List[List[torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
-        r"""Inference for streaming audio input.
+        r"""Streaming inference for the audio encoder.
 
         Args:
-            segments (Tensor): input tensor with shape `(B, chunk_size, 1)`.
-            caches (List[List[Tensor]]): list of lists of tensors representing
-                internal state for each convolution and attention module.
+            segments (Tensor): waveform chunk with shape
+                ``(B, chunk_size * frame_stacking * hop_length, 1)``.
+            caches (List[List[Tensor]]): convolution and attention caches per layer.
 
         Returns:
             Tuple[Tensor, List[List[Tensor]]]:
-                The output tensor and the updated caches.
+                Encoded features and updated caches.
         """
-
-        batch_size, device = segments.size(0), segments.device
-        valid_segment_length = (
-            self.streaming_chunk_size * self.hop_length * self.frame_stacking
-        )
-
-        if self.streaming_chunk_size is None or self.streaming_left_context is None:
-            raise ValueError("The streaming configuration is not set.")
-
-        if segments.size(1) != valid_segment_length:
-            raise ValueError(
-                f"Segment size {segments.size(1)} does not match expected {valid_segment_length}."
-            )
-
-        if segments.size(2) != 1:
-            raise ValueError("The audio signal should be mono-channel.")
-
-        if caches is None:
-            caches = self._initiate_states(
-                batch_size, self.streaming_left_context, device
-            )
-
         lengths = torch.tensor(
-            [valid_segment_length] * batch_size, device=segments.device
+            [segments.size(1)] * segments.size(0), device=segments.device
         )
 
-        xs, x_lens = self.extractor(segments, lengths)
+        xs, _ = self.extractor(segments, lengths)
+        xs = xs[:, : self.streaming_chunk_size, :]
 
-        conv_mask = make_padding_mask(x_lens)
-        attn_mask = make_attention_mask(
-            x_lens, self.streaming_chunk_size, self.streaming_left_context
-        )
-
-        new_caches = []
-        for layer, (conv_cache, attn_cache) in zip(self.layers, caches):
-            xs, conv_cache, attn_cache = layer(
-                xs, conv_mask, attn_mask, conv_cache, attn_cache
-            )
-            new_caches.append([conv_cache, attn_cache])
-
-        return xs, new_caches
-
-    @torch.jit.export
-    def set_streaming_config(self, chunk_size: int):
-        r"""Set the streaming configuration for the audio encoder.
-
-        Args:
-            chunk_size (int): segment length for streaming inference.
-        """
-
-        self.streaming_chunk_size = chunk_size
-        self.streaming_left_context = chunk_size * self.left_context_ratio
-
-    def _initiate_states(
-        self, batch_size: int, left_context: int, device: torch.device
-    ) -> List[List[torch.Tensor]]:
-        r"""Initiate empty states for streaming inference.
-
-        Args:
-            batch_size (int): batch size for the input.
-            left_context (int): left context length for the attention module.
-            device (torch.device): device for the tensors.
-
-        Returns:
-            List[List[torch.Tensor]]: list of lists of tensors representing
-                internal state for each convolution and attention module.
-        """
-
-        conv_left_context = self.kernel_size - 1 if left_context > 0 else 0
-
-        conv_cache = torch.zeros(
-            batch_size, self.embed_dim, conv_left_context, device=device
-        )
-        attn_cache = torch.zeros(
-            batch_size, left_context, self.embed_dim, device=device
-        )
-
-        return [[conv_cache, attn_cache] for _ in range(len(self.layers))]
+        return self._infer_layers(xs, caches)
