@@ -17,7 +17,7 @@
 import itertools
 import os
 import random
-from typing import Tuple
+from typing import Optional, Tuple
 
 import lightning as L
 import torch
@@ -113,7 +113,7 @@ class AudioCodecTask(L.LightningModule):
         target_audios: torch.Tensor,
         target_audio_lengths: torch.Tensor,
         apply_splice_out: bool = False,
-    ) -> Tuple[torch.Tensor | None, ...]:
+    ) -> Tuple[Optional[torch.Tensor], ...]:
         # Encode source (augmented) and optionally target (clean) audios
         if self.speaker_loss is not None:
             merged_audios = torch.cat([source_audios, target_audios], dim=0)

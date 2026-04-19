@@ -14,7 +14,7 @@
 
 """Unified Streaming and Non-Streaming Conformer"""
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -47,8 +47,8 @@ class SelfAttentionModule(nn.Module):
         padding_mask: torch.Tensor,
         attention_mask: torch.Tensor,
         contexts: torch.Tensor,
-        gamma: torch.Tensor = None,
-        beta: torch.Tensor = None,
+        gamma: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
         Args:
@@ -71,7 +71,7 @@ class SelfAttentionModule(nn.Module):
         cache = key[:, query.size(1) :, :]
 
         num_pads = attention_mask.size(1) - padding_mask.size(1)
-        kv_mask = F.pad(padding_mask, (num_pads, 0), value=0)
+        kv_mask = F.pad(padding_mask, (num_pads, 0))
 
         x, _ = self.attention(
             query=query,
@@ -124,8 +124,8 @@ class ConvolutionModule(nn.Module):
         inputs: torch.Tensor,
         padding_masks: torch.Tensor,
         contexts: torch.Tensor,
-        gamma: torch.Tensor = None,
-        beta: torch.Tensor = None,
+        gamma: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
         Args:
@@ -240,7 +240,7 @@ class ConformerLayer(nn.Module):
         attn_mask: torch.Tensor,
         conv_cache: torch.Tensor,
         attn_cache: torch.Tensor,
-        spk_emb: torch.Tensor = None,
+        spk_emb: Optional[torch.Tensor] = None,
     ):
         r"""
         Args:

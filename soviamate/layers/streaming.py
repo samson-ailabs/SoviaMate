@@ -15,7 +15,7 @@
 """Base class for streaming conformer modules."""
 
 import abc
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -91,7 +91,10 @@ class StreamingConformer(nn.Module, abc.ABC):
         self.streaming_left_context = chunk_size * self.left_context_ratio
 
     def _forward_layers(
-        self, xs: torch.Tensor, x_lens: torch.Tensor, spk_emb: torch.Tensor = None
+        self,
+        xs: torch.Tensor,
+        x_lens: torch.Tensor,
+        spk_emb: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run conformer layers with dynamic chunk masking.
 
@@ -129,15 +132,16 @@ class StreamingConformer(nn.Module, abc.ABC):
     def _infer_layers(
         self,
         segments: torch.Tensor,
-        caches: List[List[torch.Tensor]] = None,
-        spk_emb: torch.Tensor = None,
+        caches: Optional[List[List[torch.Tensor]]] = None,
+        spk_emb: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
         """Run conformer layers in streaming mode with caches.
 
         Args:
-            segments (Tensor): input chunk with shape `(B, chunk_size, D)`.
-            caches (List[List[Tensor]], optional): per-layer [conv_cache, attn_cache].
-            spk_emb (Tensor, optional): speaker embedding for AdaLN `(B, S)`.
+            segments (Tensor): Input with shape ``(B, N * chunk_size, D)``.
+            caches (List[List[Tensor]], optional): Per-layer ``[conv_cache, attn_cache]``
+                from the previous call, or ``None`` on a cold start.
+            spk_emb (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
 
         Returns:
             Tuple[Tensor, List[List[Tensor]]]: (output, new_caches).
@@ -148,17 +152,17 @@ class StreamingConformer(nn.Module, abc.ABC):
         if self.streaming_chunk_size is None or self.streaming_left_context is None:
             raise ValueError("Streaming configuration is not set.")
 
-        if segments.size(1) != self.streaming_chunk_size:
+        if segments.size(1) == 0 or segments.size(1) % self.streaming_chunk_size != 0:
             raise ValueError(
-                f"Segment size {segments.size(1)} does not match "
-                f"streaming_chunk_size {self.streaming_chunk_size}."
+                f"Segment size {segments.size(1)} must be a positive multiple "
+                f"of streaming_chunk_size {self.streaming_chunk_size}."
             )
 
         if caches is None:
             caches = self._init_caches(batch_size, self.streaming_left_context, device)
 
         xs = segments
-        x_lens = torch.tensor([self.streaming_chunk_size] * batch_size, device=device)
+        x_lens = torch.tensor([segments.size(1)] * batch_size, device=device)
 
         conv_mask = make_padding_mask(x_lens)
         attn_mask = make_attention_mask(

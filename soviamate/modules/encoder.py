@@ -14,29 +14,29 @@
 
 """Encoder modules for transforming inputs to latent representations."""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
-from soviamate.layers.processor import SpectrogramProcessor
+from soviamate.layers.processor import SpectralAnalyzer
 from soviamate.layers.streaming import StreamingConformer
 
 
 class AudioEncoder(StreamingConformer):
-    """Audio Encoder with STFT feature extraction and conformer layers.
+    r"""Audio encoder: spectral analyzer followed by streaming conformer layers.
 
     Args:
-        frame_stacking (int): number of spectrogram frames to stack.
-        hop_length (int): hop length for STFT. Window length is ``2 * hop_length``.
-        num_layers (int): number of conformer layers.
-        d_model (int): embedding dimension for the conformer layers.
-        ffn_dim (int): hidden dimension for the feed-forward module.
-        num_heads (int): number of attention heads.
-        kernel_size (int): kernel size for the convolutional module.
-        dropout (float): dropout probability for each module.
-        dynamic_chunk_sizes (List[int]): chunk sizes to sample from during training.
-        left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
-        full_context_prob (float, optional): probability of full context mode. Default: 0.0.
+        frame_stacking (int): Sub-frames per feature frame.
+        hop_length (int): Samples per sub-frame (non-overlapping rfft window).
+        num_layers (int): Number of conformer layers.
+        d_model (int): Conformer embedding dimension.
+        ffn_dim (int): Conformer feedforward hidden dimension.
+        num_heads (int): Number of attention heads.
+        kernel_size (int): Depthwise convolution kernel size.
+        dropout (float): Dropout probability for each conformer sub-module.
+        dynamic_chunk_sizes (List[int]): Chunk sizes sampled during training.
+        left_context_ratio (int): Ratio of left_context to chunk_size. Default: ``4``.
+        full_context_prob (float): Probability of full-context mode during training. Default: ``0.0``.
     """
 
     def __init__(
@@ -65,49 +65,46 @@ class AudioEncoder(StreamingConformer):
             full_context_prob=full_context_prob,
         )
 
-        self.extractor = SpectrogramProcessor(
+        self.analyzer = SpectralAnalyzer(
             frame_stacking=frame_stacking, hop_length=hop_length, output_dim=d_model
         )
 
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the audio encoder.
-
-        During training, chunk sizes are randomly sampled. During inference,
-        uses streaming config if set, otherwise uses full context.
+        r"""Full-context forward pass through the analyzer and conformer layers.
 
         Args:
-            waveforms (Tensor): input tensor with shape `(B, T, 1)`.
-            lengths (Tensor): valid lengths in samples `(B,)`.
+            waveforms (Tensor): Raw waveform ``(B, T, 1)``.
+            lengths (Tensor): Per-sample valid sample counts ``(B,)``.
 
         Returns:
-            Tuple[Tensor, Tensor]: (features, lengths) with shapes
-                `(B, T', D)` and `(B,)`.
+            Tuple[Tensor, Tensor]: (features, lengths) with shapes ``(B, T', D)`` and ``(B,)``.
         """
-        xs, x_lens = self.extractor(waveforms, lengths)
+        xs, x_lens = self.analyzer(waveforms, lengths)
         return self._forward_layers(xs, x_lens)
 
     @torch.jit.export
     def infer(
-        self, segments: torch.Tensor, caches: List[List[torch.Tensor]] = None
+        self,
+        segments: torch.Tensor,
+        caches: Optional[List[List[torch.Tensor]]] = None,
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
-        r"""Streaming inference for the audio encoder.
+        r"""Streaming inference with caller-supplied state.
 
         Args:
-            segments (Tensor): waveform chunk with shape
-                ``(B, chunk_size * frame_stacking * hop_length, 1)``.
-            caches (List[List[Tensor]]): convolution and attention caches per layer.
+            segments (Tensor): Waveform
+                ``(B, N * streaming_chunk_size * frame_stacking * hop_length, 1)``.
+            caches (List[List[Tensor]]): Per-layer ``[conv_cache, attn_cache]``
+                from the previous call, or ``None`` on a cold start.
 
         Returns:
-            Tuple[Tensor, List[List[Tensor]]]:
-                Encoded features and updated caches.
+            Tuple[Tensor, List[List[Tensor]]]: encoded features with shape
+                ``(B, N * streaming_chunk_size, D)`` and updated caches.
         """
-        lengths = torch.tensor(
-            [segments.size(1)] * segments.size(0), device=segments.device
+        batch_size, seq_len, _ = segments.size()
+        lengths = torch.full(
+            (batch_size,), seq_len, dtype=torch.int64, device=segments.device
         )
-
-        xs, _ = self.extractor(segments, lengths)
-        xs = xs[:, : self.streaming_chunk_size, :]
-
+        xs, _ = self.analyzer(segments, lengths)
         return self._infer_layers(xs, caches)

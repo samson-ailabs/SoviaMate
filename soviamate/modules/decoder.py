@@ -14,31 +14,32 @@
 
 """Decoder modules for reconstructing outputs from latent representations."""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from soviamate.layers.processor import InverseSpectrogramProcessor
+from soviamate.layers.processor import SpectralSynthesizer
 from soviamate.layers.streaming import StreamingConformer
 
 
 class AudioDecoder(StreamingConformer):
-    r"""Audio Decoder with conformer layers and iSTFT waveform reconstruction.
+    r"""Audio decoder: streaming conformer layers followed by spectral synthesizer.
 
     Args:
-        frame_stacking (int): number of spectrogram frames to unstack.
-        hop_length (int): hop length for iSTFT. Window length is ``2 * hop_length``.
-        num_layers (int): number of conformer layers.
-        d_model (int): embedding dimension for the conformer layers.
-        ffn_dim (int): hidden dimension for the feed-forward module.
-        num_heads (int): number of attention heads.
-        kernel_size (int): kernel size for the convolutional module.
-        dropout (float): dropout probability for each module.
-        dynamic_chunk_sizes (List[int]): chunk sizes to sample from during training.
-        left_context_ratio (int, optional): ratio of left_context to chunk_size. Default: 4.
-        full_context_prob (float, optional): probability of full context mode. Default: 0.0.
-        speaker_dim (int, optional): dimension of the speaker embedding for AdaLN. Default: 0.
+        frame_stacking (int): Sub-frames per feature frame.
+        hop_length (int): Samples per sub-frame (non-overlapping irfft window).
+        num_layers (int): Number of conformer layers.
+        d_model (int): Conformer embedding dimension.
+        ffn_dim (int): Conformer feedforward hidden dimension.
+        num_heads (int): Number of attention heads.
+        kernel_size (int): Depthwise convolution kernel size.
+        dropout (float): Dropout probability for each conformer sub-module.
+        dynamic_chunk_sizes (List[int]): Chunk sizes sampled during training.
+        left_context_ratio (int): Ratio of left_context to chunk_size. Default: ``4``.
+        full_context_prob (float): Probability of full-context mode during training. Default: ``0.0``.
+        speaker_dim (int): Speaker embedding dimension for AdaLN-Gaussian
+            conditioning. Set to ``0`` to disable. Default: ``0``.
     """
 
     def __init__(
@@ -69,7 +70,7 @@ class AudioDecoder(StreamingConformer):
             speaker_dim=speaker_dim,
         )
 
-        self.vocoder = InverseSpectrogramProcessor(
+        self.synthesizer = SpectralSynthesizer(
             frame_stacking=frame_stacking, hop_length=hop_length, input_dim=d_model
         )
 
@@ -77,54 +78,50 @@ class AudioDecoder(StreamingConformer):
         self,
         latents: torch.Tensor,
         lengths: torch.Tensor,
-        speaker_emb: torch.Tensor = None,
-        max_output_length: int = None,
+        speaker_emb: Optional[torch.Tensor] = None,
+        max_output_length: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward pass of the audio decoder.
-
-        During training, chunk sizes are randomly sampled. During inference,
-        uses streaming config if set, otherwise uses full context.
+        r"""Full-context forward pass through the conformer layers and synthesizer.
 
         Args:
-            latents (Tensor): latent representations with shape `(B, T, D)`.
-            lengths (Tensor): actual lengths of latent sequences `(B,)`.
-            speaker_emb (Tensor, optional): speaker embedding for AdaLN `(B, S)`.
-            max_output_length (int, optional): maximum output audio length in samples.
+            latents (Tensor): Latent representations ``(B, T, D)``.
+            lengths (Tensor): Per-sample valid frame counts ``(B,)``.
+            speaker_emb (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
+            max_output_length (int, optional): Target output sample count.
 
         Returns:
-            Tuple[Tensor, Tensor]: (output_audio, output_lengths) with shapes
-                `(B, T', 1)` and `(B,)`.
+            Tuple[Tensor, Tensor]: (waveforms, output_lengths) with shapes
+                ``(B, T', 1)`` and ``(B,)``.
         """
         xs, x_lens = self._forward_layers(latents, lengths, speaker_emb)
-        xs, x_lens = self.vocoder(xs, x_lens, max_output_length=max_output_length)
-        return xs, x_lens
+        return self.synthesizer(xs, x_lens, max_output_length=max_output_length)
 
     @torch.jit.export
     def infer(
         self,
         segments: torch.Tensor,
-        caches: List[List[torch.Tensor]] = None,
-        speaker_emb: torch.Tensor = None,
+        caches: Optional[List[List[torch.Tensor]]] = None,
+        speaker_emb: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
-        r"""Streaming inference for the audio decoder.
+        r"""Streaming inference with caller-supplied state.
 
         Args:
-            segments (Tensor): input tensor with shape `(B, chunk_size, D)`.
-            caches (List[List[Tensor]]): convolution and attention caches per layer.
-            speaker_emb (Tensor, optional): speaker embedding for AdaLN `(B, S)`.
+            segments (Tensor): Latent chunk with shape
+                ``(B, N * streaming_chunk_size, D)`` for any ``N >= 1``.
+            caches (List[List[Tensor]]): Per-layer ``[conv_cache, attn_cache]``
+                from the previous call, or ``None`` on a cold start.
+            speaker_emb (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
 
         Returns:
-            Tuple[Tensor, List[List[Tensor]]]:
-                Output audio and updated caches.
+            Tuple[Tensor, List[List[Tensor]]]: raw waveform chunk and
+                updated caches.
         """
-        x_lens = torch.tensor(
-            [self.streaming_chunk_size] * segments.size(0), device=segments.device
-        )
-
         xs, new_caches = self._infer_layers(segments, caches, speaker_emb)
-        xs, _ = self.vocoder(xs, x_lens)
-
-        return xs, new_caches
+        lengths = torch.full(
+            (segments.size(0),), xs.size(1), dtype=torch.int64, device=segments.device
+        )
+        waveforms, _ = self.synthesizer(xs, lengths)
+        return waveforms, new_caches
 
 
 class TextDecoder(StreamingConformer):
@@ -193,7 +190,9 @@ class TextDecoder(StreamingConformer):
 
     @torch.jit.export
     def infer(
-        self, segments: torch.Tensor, caches: List[List[torch.Tensor]] = None
+        self,
+        segments: torch.Tensor,
+        caches: Optional[List[List[torch.Tensor]]] = None,
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
         r"""Streaming inference for the text decoder.
 
