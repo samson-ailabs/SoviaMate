@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Audio Codec Bundle for production."""
+"""Audio codec bundle for production inference."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,33 +49,63 @@ class CodecOutputs:
     """Structured outputs from AudioCodecBundle.
 
     Attributes:
-        audios: Decoded audio.
-        audio_lengths: Length of each audio.
-        tokens: Optional ASR tokens.
-        token_lengths: Optional token lengths.
+        audios: Decoded audio, shape ``(B, T_max, 1)``.
+        audio_lengths: Per-sample lengths, shape ``(B,)``.
+        tokens: Optional greedy-argmax ASR token ids, shape ``(B, T_tok)``.
+        token_lengths: Optional per-sample token lengths, shape ``(B,)``.
     """
 
-    audios: Union[torch.Tensor, List[torch.Tensor]]
-    audio_lengths: Optional[torch.Tensor]
-    tokens: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None
+    audios: torch.Tensor
+    audio_lengths: torch.Tensor
+    tokens: Optional[torch.Tensor] = None
     token_lengths: Optional[torch.Tensor] = None
 
 
-class AudioCodecBundle(nn.Module):
-    """Audio Codec Bundle for production.
+@dataclass
+class CodecStreamState:
+    """Per-session state for streaming inference through AudioCodecBundle.
 
-    This class bundles the audio encoder, quantizer, and decoder along with
-    optional ASR decoder and speaker adapter for voice conversion. Loads from
-    checkpoints created by AudioCodecTask.export_model() for production deployment.
+    Attributes:
+        chunk_size: Feature frames per chunk.
+        speaker_embeddings: Optional speaker embedding for voice conversion.
+        encoder_caches: Encoder layer caches; ``None`` on a cold start.
+        decoder_caches: Decoder layer caches; ``None`` on a cold start.
+        return_text: Whether to decode a transcript for each chunk.
+        text_caches: Text-decoder layer caches; ``None`` on a cold start.
+        last_token: Last emitted non-blank token for cross-chunk CTC
+            deduplication; ``-1`` on a cold start.
+    """
+
+    chunk_size: int
+    speaker_embeddings: Optional[torch.Tensor] = None
+    encoder_caches: Optional[List[List[torch.Tensor]]] = None
+    decoder_caches: Optional[List[List[torch.Tensor]]] = None
+    return_text: bool = False
+    text_caches: Optional[List[List[torch.Tensor]]] = None
+    last_token: int = -1
+
+
+class AudioCodecBundle(nn.Module):
+    """Audio codec bundle for production inference.
+
+    Bundles the audio encoder, quantizer, and decoder with optional ASR text
+    decoder and speaker adapter. Exposes two inference modes:
+
+    * :meth:`forward` — full-context reconstruction or voice conversion.
+    * :meth:`init_stream` + :meth:`stream_chunk` — chunked streaming
+      inference with persistent encoder/decoder/text caches.
+
+    Load via :meth:`from_checkpoint` on a file produced by
+    ``AudioCodecTask.export_model()``.
 
     Args:
-        audio_encoder: The audio encoder module.
-        audio_quantizer: The audio quantizer module.
-        audio_decoder: The audio decoder module with speaker conditioning.
+        audio_encoder: Audio encoder module.
+        audio_quantizer: Audio quantizer module.
+        audio_decoder: Audio decoder module with speaker conditioning.
         text_decoder: Optional ASR text decoder module.
         speaker_adapter: Optional frozen speaker encoder for voice conversion.
-        tokenizer: Optional tokenizer for decoding token indices to text.
-        device: Device to place the model on ('cpu', 'cuda', 'cuda:0', etc.).
+        tokenizer: Optional tokenizer for decoding token ids to text.
+        device: Device to place the model on (``'cpu'``, ``'cuda'``, ...).
     """
 
     def __init__(
@@ -103,7 +133,6 @@ class AudioCodecBundle(nn.Module):
         if device is not None:
             self.to(device)
 
-        # Set to eval mode for inference
         self.eval()
 
     @property
@@ -266,8 +295,8 @@ class AudioCodecBundle(nn.Module):
                 [source_audios.size(1)], device=source_audios.device
             )
 
-        prompt_audio_lengths = None
         batch_size = source_audios.size(0)
+        prompt_audio_lengths = None
 
         if prompt_audios is not None:
             if isinstance(prompt_audios, list):
@@ -278,12 +307,14 @@ class AudioCodecBundle(nn.Module):
                     )
                 prompt_audios, prompt_audio_lengths = self.pack_sequence(prompt_audios)
             else:
-                prompt_audios = prompt_audios.t().unsqueeze(0)
-                prompt_audios = prompt_audios.expand(batch_size, -1, -1)
-
-                seq_length, device = prompt_audios.size(1), prompt_audios.device
+                prompt_audios = (
+                    prompt_audios.t().unsqueeze(0).expand(batch_size, -1, -1)
+                )
                 prompt_audio_lengths = torch.full(
-                    (batch_size,), seq_length, dtype=torch.long, device=device
+                    (batch_size,),
+                    prompt_audios.size(1),
+                    dtype=torch.long,
+                    device=prompt_audios.device,
                 )
 
         return CodecInputs(
@@ -332,20 +363,27 @@ class AudioCodecBundle(nn.Module):
         fbank_lengths = torch.tensor(fbank_lengths, dtype=torch.long, device=device)
         return padded_fbank, fbank_lengths
 
-    @staticmethod
     def _ctc_collapse(
-        tokens: torch.Tensor, blank: int = 0, last_token: int = -1
-    ) -> List[int]:
-        """Collapse CTC output by removing consecutive duplicates and blanks.
+        self, tokens: torch.Tensor, blank: int = 0, last_token: int = -1
+    ) -> Tuple[str, int]:
+        """Collapse CTC tokens, decode to text, and report the new last token.
+
+        Removes consecutive duplicates and blanks. When ``last_token >= 0``
+        (streaming mode), prepends it to both the collapse (for cross-chunk
+        dedup) and the tokenizer decode (so SentencePiece preserves the ``▁``
+        word-boundary prefix at the chunk start), then strips the prefix
+        contribution so consecutive chunk transcripts concatenate cleanly.
 
         Args:
-            tokens (Tensor): Token indices (T,).
-            blank (int): Blank token index. Default: 0.
-            last_token (int): Last token from previous chunk for cross-chunk
-                deduplication. Use -1 (default) for full-context decoding.
+            tokens (Tensor): Raw per-frame token ids ``(T,)``.
+            blank (int): Blank token index. Default: ``0``.
+            last_token (int): Last emitted token from the previous chunk;
+                ``-1`` for full-context decoding (no cross-chunk context).
 
         Returns:
-            List[int]: Collapsed token indices.
+            Tuple[str, int]: ``(text, new_last_token)``. ``new_last_token``
+                is ``collapsed[-1]`` if this chunk emitted any tokens,
+                otherwise the input ``last_token`` unchanged.
         """
         if last_token >= 0:
             prefix = torch.tensor([last_token], device=tokens.device)
@@ -357,31 +395,39 @@ class AudioCodecBundle(nn.Module):
         if last_token >= 0 and collapsed and collapsed[0] == last_token:
             collapsed = collapsed[1:]
 
-        return collapsed
+        if not collapsed:
+            return "", last_token
+
+        if last_token >= 0:
+            ctx = [last_token]
+            ctx_len = len(self.tokenizer.decode(ctx))
+            text = self.tokenizer.decode(ctx + collapsed)[ctx_len:]
+        else:
+            text = self.tokenizer.decode(collapsed)
+
+        return text, collapsed[-1]
 
     def _process(
-        self, codec_inputs: CodecInputs, return_tokens: bool = False
+        self, codec_inputs: CodecInputs, return_text: bool = False
     ) -> CodecOutputs:
         """Process audio through the codec pipeline with optional speaker conditioning.
 
         Args:
             codec_inputs: Structured inputs with batched tensors.
-            return_tokens: Whether to return ASR tokens.
+            return_text: Whether to run the text decoder and return a transcript.
 
         Returns:
             CodecOutputs with processed audio and optional tokens.
         """
         # Validate optional components
-        if return_tokens and self.text_decoder is None:
+        if return_text and self.text_decoder is None:
             raise ValueError(
-                "Cannot return tokens: text_decoder not available. "
-                "Load checkpoint with text_decoder component."
+                "Cannot return transcript: text_decoder not available in bundle."
             )
 
         if codec_inputs.prompt_audios is not None and self.speaker_adapter is None:
             raise ValueError(
-                "Cannot apply speaker adaptation: speaker_adapter not available. "
-                "Load checkpoint with speaker_adapter component."
+                "Cannot use prompt audio: speaker_adapter not available in bundle."
             )
 
         # Encode source audio
@@ -389,11 +435,11 @@ class AudioCodecBundle(nn.Module):
             codec_inputs.source_audios, codec_inputs.source_audio_lengths
         )
 
-        # ASR token decoding (optional)
+        # Text decoder forward (optional)
         output_tokens = None
         token_lengths = None
 
-        if return_tokens:
+        if return_text:
             logits, token_lengths = self.text_decoder(
                 source_features, source_feature_lengths
             )
@@ -415,14 +461,13 @@ class AudioCodecBundle(nn.Module):
                 prompt_fbanks, prompt_fbank_lengths
             )
 
-        # Calculate maximum output length for exact reconstruction
+        # Decode with speaker conditioning; clamp output to source length so
+        # the padded-batch output matches per-sample audio lengths exactly.
         max_output_length = codec_inputs.source_audio_lengths.max().item()
-
-        # Decode with speaker conditioning
         output_audios, output_lengths = self.audio_decoder(
             quantized_outputs,
             quantized_lengths,
-            speaker_emb=speaker_embeddings,
+            speaker_embeddings=speaker_embeddings,
             max_output_length=max_output_length,
         )
 
@@ -436,8 +481,7 @@ class AudioCodecBundle(nn.Module):
     def _unpack_outputs(
         self, codec_outputs: CodecOutputs, as_list: bool = False
     ) -> Tuple[
-        Union[torch.Tensor, List[torch.Tensor]],
-        Optional[Union[str, List[str]]],
+        Union[torch.Tensor, List[torch.Tensor]], Optional[Union[str, List[str]]]
     ]:
         """Unpack outputs to requested format.
 
@@ -457,10 +501,10 @@ class AudioCodecBundle(nn.Module):
         if codec_outputs.tokens is not None:
             text_list = []
             for i in range(codec_outputs.tokens.size(0)):
-                tokens = self._ctc_collapse(
+                text, _ = self._ctc_collapse(
                     codec_outputs.tokens[i, : codec_outputs.token_lengths[i]]
                 )
-                text_list.append(self.tokenizer.decode(tokens))
+                text_list.append(text)
 
         if as_list:
             return audio_list, text_list
@@ -472,7 +516,7 @@ class AudioCodecBundle(nn.Module):
         self,
         source_audios: Union[torch.Tensor, List[torch.Tensor]],
         prompt_audios: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-        return_tokens: bool = False,
+        return_text: bool = False,
     ) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
         Optional[Union[str, List[str]]],
@@ -490,12 +534,14 @@ class AudioCodecBundle(nn.Module):
             prompt_audios: Optional speaker reference audio matching source format.
                 Single tensor (1, T) or list [(1, T1), (1, T2), ...].
                 Used to extract target speaker identity for voice conversion.
-            return_tokens: Whether to return ASR tokens (requires text_decoder).
+            return_text: Whether to run the text decoder and return a transcript
+                (requires ``text_decoder`` and ``tokenizer``).
 
         Returns:
-            audios: Single tensor (1, T') or list [(1, T1'), ...] matching input format.
-            texts: Decoded text string or list of strings if return_tokens is True.
-                None if return_tokens is False.
+            audios: Single tensor ``(1, T')`` or list ``[(1, T1'), ...]`` matching
+                the input format.
+            texts: Decoded transcript (single string or list of strings) when
+                ``return_text`` is True; ``None`` otherwise.
 
         Examples:
             >>> # Standard codec
@@ -505,11 +551,117 @@ class AudioCodecBundle(nn.Module):
             >>> converted_audio, _ = bundle(source_audio, prompt_audios=target_speaker_audio)
 
             >>> # Codec with ASR transcription
-            >>> reconstructed_audio, transcript = bundle(audio, return_tokens=True)
+            >>> reconstructed_audio, transcript = bundle(audio, return_text=True)
         """
         is_list = isinstance(source_audios, list)
 
         inputs = self._pack_inputs(source_audios, prompt_audios)
-        outputs = self._process(inputs, return_tokens=return_tokens)
+        outputs = self._process(inputs, return_text=return_text)
 
         return self._unpack_outputs(outputs, as_list=is_list)
+
+    def init_stream(
+        self,
+        chunk_size: int,
+        prompt_audio: Optional[torch.Tensor] = None,
+        return_text: bool = False,
+    ) -> CodecStreamState:
+        """Initialize a streaming inference session.
+
+        Configures encoder/decoder streaming chunk size on the bundle's
+        modules and precomputes the speaker embedding if a prompt is given.
+        Returns a per-session state object; pass it to :meth:`stream_chunk`
+        for each incoming chunk.
+
+        Args:
+            chunk_size: Feature frames per chunk. Each audio chunk passed
+                to :meth:`stream_chunk` must be exactly
+                ``chunk_size · frame_stacking · hop_length`` samples.
+            prompt_audio: Optional speaker prompt ``(1, T)`` for voice
+                conversion. Its embedding is computed once here and reused
+                across all chunks for this session.
+            return_text: Whether to run the text decoder on each chunk
+                and return an incremental transcript. Requires both
+                ``text_decoder`` and ``tokenizer`` in the bundle.
+
+        Returns:
+            Per-session state to thread through :meth:`stream_chunk`.
+        """
+        if return_text and (self.text_decoder is None or self.tokenizer is None):
+            raise ValueError(
+                "Cannot return text: text_decoder or tokenizer not available in bundle."
+            )
+
+        self.audio_encoder.set_streaming_config(chunk_size)
+        self.audio_decoder.set_streaming_config(chunk_size)
+
+        if return_text:
+            self.text_decoder.set_streaming_config(chunk_size)
+
+        speaker_embeddings = None
+        if prompt_audio is not None:
+            if self.speaker_adapter is None:
+                raise ValueError(
+                    "Cannot use prompt_audio: speaker_adapter not available in bundle."
+                )
+
+            prompt = prompt_audio.t().unsqueeze(0).to(self.device)
+            length = torch.tensor(
+                [prompt.size(1)], dtype=torch.long, device=self.device
+            )
+
+            fbanks, fbank_lengths = self._compute_fbank(prompt, length)
+            speaker_embeddings = self.speaker_adapter(fbanks, fbank_lengths)
+
+        return CodecStreamState(
+            chunk_size=chunk_size,
+            speaker_embeddings=speaker_embeddings,
+            return_text=return_text,
+        )
+
+    @torch.inference_mode()
+    def stream_chunk(
+        self, audio_chunk: torch.Tensor, state: CodecStreamState
+    ) -> Tuple[torch.Tensor, Optional[str], CodecStreamState]:
+        """Process one chunk of audio through a streaming session.
+
+        Args:
+            audio_chunk: Shape ``(1, chunk_samples)`` where
+                ``chunk_samples = chunk_size · frame_stacking · hop_length``.
+            state: Session state from :meth:`init_stream`. Mutated in place
+                with updated caches and returned for convenience.
+
+        Returns:
+            waveform_chunk: Decoded waveform for the current chunk only, shape
+                ``(1, chunk_samples)``. Not cumulative — concatenate across
+                calls if you want full-session audio.
+            text_chunk: Incremental transcript emitted for the current chunk,
+                CTC-collapsed and deduplicated against the previous chunk's
+                last emission. ``None`` when ``return_text`` was not set.
+            state: Same state instance, with caches advanced to the next call.
+
+        Example:
+            >>> state = bundle.init_stream(chunk_size=8, prompt_audio=prompt)
+            >>> for chunk in audio_chunks:
+            ...     wav_chunk, _, state = bundle.stream_chunk(chunk, state)
+        """
+        audio_chunk = audio_chunk.t().unsqueeze(0).to(self.device)
+        features, state.encoder_caches = self.audio_encoder.infer(
+            audio_chunk, state.encoder_caches
+        )
+
+        text_chunk = None
+        if state.return_text:
+            logits, state.text_caches = self.text_decoder.infer(
+                features, state.text_caches
+            )
+            text_chunk, state.last_token = self._ctc_collapse(
+                logits.argmax(dim=-1)[0], last_token=state.last_token
+            )
+
+        quantized, _ = self.audio_quantizer(features)
+        audio_chunk, state.decoder_caches = self.audio_decoder.infer(
+            quantized, state.decoder_caches, state.speaker_embeddings
+        )
+
+        return audio_chunk.squeeze(-1), text_chunk, state

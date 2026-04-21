@@ -78,7 +78,7 @@ class AudioDecoder(StreamingConformer):
         self,
         latents: torch.Tensor,
         lengths: torch.Tensor,
-        speaker_emb: Optional[torch.Tensor] = None,
+        speaker_embeddings: Optional[torch.Tensor] = None,
         max_output_length: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Full-context forward pass through the conformer layers and synthesizer.
@@ -86,14 +86,14 @@ class AudioDecoder(StreamingConformer):
         Args:
             latents (Tensor): Latent representations ``(B, T, D)``.
             lengths (Tensor): Per-sample valid frame counts ``(B,)``.
-            speaker_emb (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
+            speaker_embeddings (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
             max_output_length (int, optional): Target output sample count.
 
         Returns:
             Tuple[Tensor, Tensor]: (waveforms, output_lengths) with shapes
                 ``(B, T', 1)`` and ``(B,)``.
         """
-        xs, x_lens = self._forward_layers(latents, lengths, speaker_emb)
+        xs, x_lens = self._forward_layers(latents, lengths, speaker_embeddings)
         return self.synthesizer(xs, x_lens, max_output_length=max_output_length)
 
     @torch.jit.export
@@ -101,7 +101,7 @@ class AudioDecoder(StreamingConformer):
         self,
         segments: torch.Tensor,
         caches: Optional[List[List[torch.Tensor]]] = None,
-        speaker_emb: Optional[torch.Tensor] = None,
+        speaker_embeddings: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
         r"""Streaming inference with caller-supplied state.
 
@@ -110,13 +110,13 @@ class AudioDecoder(StreamingConformer):
                 ``(B, N * streaming_chunk_size, D)`` for any ``N >= 1``.
             caches (List[List[Tensor]]): Per-layer ``[conv_cache, attn_cache]``
                 from the previous call, or ``None`` on a cold start.
-            speaker_emb (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
+            speaker_embeddings (Tensor, optional): Speaker embedding for AdaLN ``(B, S)``.
 
         Returns:
             Tuple[Tensor, List[List[Tensor]]]: raw waveform chunk and
                 updated caches.
         """
-        xs, new_caches = self._infer_layers(segments, caches, speaker_emb)
+        xs, new_caches = self._infer_layers(segments, caches, speaker_embeddings)
         lengths = torch.full(
             (segments.size(0),), xs.size(1), dtype=torch.int64, device=segments.device
         )

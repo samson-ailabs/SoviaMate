@@ -15,7 +15,7 @@
 """Vector Quantization for Discrete Representation Learning"""
 
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -52,13 +52,17 @@ class FiniteScalarQuantizer(nn.Module):
         self.post_quant = nn.Linear(len(fsq_levels), input_dim)
 
     def forward(
-        self, features: torch.Tensor, lengths: torch.Tensor
+        self, features: torch.Tensor, lengths: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass with FSQ quantization.
 
+        FSQ is a per-position operation and does not use ``lengths``; the
+        argument is accepted for pipeline symmetry with encoder/decoder. If
+        omitted, ``lengths`` is filled with ``features.size(1)``.
+
         Args:
             features (Tensor): features from encoder, shape `(B, T, D)`.
-            lengths (Tensor): lengths of features, shape `(B,)`.
+            lengths (Tensor, optional): lengths of features, shape `(B,)`.
 
         Returns:
             Tensor: quantized features, shape `(B, T, D)`.
@@ -66,7 +70,15 @@ class FiniteScalarQuantizer(nn.Module):
         """
         z_fsq_input = self.pre_quant(features)
         z_quantized = self._quantize_vectors(z_fsq_input)
-        return self.post_quant(z_quantized), lengths
+        output = self.post_quant(z_quantized)
+
+        if lengths is None:
+            batch_size, max_length = output.size(0), output.size(1)
+            lengths = torch.full(
+                (batch_size,), max_length, dtype=torch.long, device=output.device
+            )
+
+        return output, lengths
 
     @torch.autocast(device_type="cuda", enabled=False)
     def _quantize_vectors(self, x: torch.Tensor) -> torch.Tensor:
