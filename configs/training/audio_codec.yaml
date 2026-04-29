@@ -44,8 +44,8 @@ task:
     speaker_dim: &speaker_dim 192
     recon_grad_scale: 0.2
 
-    frame_stacking: &frame_stacking 2
-    hop_length: &hop_length 320
+    hop_length: &hop_length 640
+    frame_stacking: &frame_stacking 1
 
     dynamic_chunk_sizes: &dynamic_chunk_sizes [4, 8, 12, 16]
     full_context_prob: &full_context_prob 0.2

@@ -14,6 +14,7 @@
 
 """Audio processing modules for waveform feature extraction and reconstruction."""
 
+import math
 import random
 from typing import Optional, Tuple
 
@@ -22,17 +23,18 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 
-# Power-compression exponent for the complex streams (|s|^β · cos φ, |s|^β · sin φ).
-# β < 1 compresses dynamic range so the linear projection can attend to quiet bins.
+# β < 1 compresses dynamic range of the |s|^β · cos φ, |s|^β · sin φ streams.
 POWER_COMPRESSION_BETA: float = 0.3
+
+# Magnitude floor; ``-log(FLOOR)`` normalizes ``log_mag`` to roughly [-1, 0].
+LOG_MAG_FLOOR: float = 1e-5
 
 
 class SpectralAnalyzer(nn.Module):
     r"""Waveform-to-feature projection via non-overlapping rfft.
 
-    Each sub-frame emits 3 streams per bin — ``log|s|``, ``|s|^β·cos φ``,
-    ``|s|^β·sin φ`` — with ``β < 1`` compressing the complex streams.
-    Adjacent sub-frames are stacked before projection.
+    Three streams per fft bin (``log|s|``, ``|s|^β·cos φ``, ``|s|^β·sin φ``)
+    concatenated and projected to ``output_dim`` by a single Linear.
 
     Args:
         output_dim (int): Projected feature dimension.
@@ -46,9 +48,8 @@ class SpectralAnalyzer(nn.Module):
         self.hop_length = hop_length
         self.frame_stacking = frame_stacking
         self.fft_bins = hop_length // 2 + 1
-        self.sub_frame_dim = self.fft_bins * 3
 
-        self.proj = nn.Linear(self.sub_frame_dim * frame_stacking, output_dim)
+        self.frame_proj = nn.Linear(3 * self.fft_bins * frame_stacking, output_dim)
 
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
@@ -74,8 +75,8 @@ class SpectralAnalyzer(nn.Module):
         sub_frames = x.reshape(batch_size, -1, self.hop_length)
         spectrum = torch.fft.rfft(sub_frames)
 
-        magnitude = spectrum.abs().clamp(min=1e-5)
-        log_mag = magnitude.log()
+        magnitude = spectrum.abs().clamp(min=LOG_MAG_FLOOR)
+        log_mag = magnitude.log() / -math.log(LOG_MAG_FLOOR)
 
         mag_beta = magnitude.pow(POWER_COMPRESSION_BETA)
         real_c = mag_beta * (spectrum.real / magnitude)
@@ -84,7 +85,7 @@ class SpectralAnalyzer(nn.Module):
         x = torch.cat([log_mag, real_c, imag_c], dim=-1)
         x = x.reshape(batch_size, x.size(1) // self.frame_stacking, -1)
 
-        features = self.proj(x)
+        features = self.frame_proj(x)
         output_lengths = (lengths + stride - 1).div(stride, rounding_mode="floor")
 
         return features, output_lengths
@@ -93,9 +94,8 @@ class SpectralAnalyzer(nn.Module):
 class SpectralSynthesizer(nn.Module):
     r"""Feature-to-waveform projection via non-overlapping irfft.
 
-    Predicts 3 streams per bin — ``(log_mag, real, imag)`` — and composes
-    ``spec = exp(log_mag) · (real + j·imag)``. Leaving ``(real, imag)``
-    un-normalized lets all three channels carry magnitude and phase jointly.
+    Three streams per fft bin (``raw_scale``, ``raw_real``, ``raw_imag``) compose
+    ``spec = softplus(raw_scale) · (raw_real + j·raw_imag)`` before irfft.
 
     Args:
         input_dim (int): Input feature dimension.
@@ -109,9 +109,8 @@ class SpectralSynthesizer(nn.Module):
         self.hop_length = hop_length
         self.frame_stacking = frame_stacking
         self.fft_bins = hop_length // 2 + 1
-        self.sub_frame_dim = self.fft_bins * 3
 
-        self.proj = nn.Linear(input_dim, self.sub_frame_dim * frame_stacking)
+        self.frame_proj = nn.Linear(input_dim, 3 * self.fft_bins * frame_stacking)
 
     def forward(
         self,
@@ -131,13 +130,13 @@ class SpectralSynthesizer(nn.Module):
                 ``(B, T', 1)`` and ``(B,)``.
         """
         batch_size, num_frames, _ = features.shape
+        sub_frames = num_frames * self.frame_stacking
 
-        x = self.proj(features)
-        x = x.reshape(batch_size, num_frames * self.frame_stacking, self.sub_frame_dim)
-        log_mag, real, imag = x.chunk(3, dim=-1)
+        x = self.frame_proj(features).reshape(batch_size, sub_frames, self.fft_bins, 3)
+        raw_scale, raw_real, raw_imag = x.unbind(-1)
 
-        mag_scale = log_mag.exp()
-        spectrum = torch.complex(mag_scale * real, mag_scale * imag)
+        magnitude = F.softplus(raw_scale)
+        spectrum = torch.complex(raw_real * magnitude, raw_imag * magnitude)
 
         frames = torch.fft.irfft(spectrum, n=self.hop_length)
         waveforms = frames.reshape(batch_size, -1, 1)
