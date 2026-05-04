@@ -86,11 +86,14 @@ class PQMF(nn.Module):
         return x
 
 
-class DiscriminatorP(nn.Module):
-    """PQMF-based period discriminator for subband analysis.
+class BandDiscriminator(nn.Module):
+    """Single-band discriminator on a PQMF-decomposed waveform.
+
+    Splits the input into ``period`` equally-spaced subbands via PQMF, then
+    runs a 2D conv stack treating subbands as the channel-like axis.
 
     Args:
-        period: Number of subbands for PQMF decomposition.
+        period: Number of PQMF subbands. ``1`` disables PQMF (full waveform).
         taps: PQMF filter taps.
         cutoff: PQMF cutoff frequency ratio.
         beta: PQMF Kaiser window beta parameter.
@@ -116,7 +119,7 @@ class DiscriminatorP(nn.Module):
         self.proj = weight_norm(nn.Conv2d(1024, 1, (1, 3), (1, 1), (0, 1)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through filter bank discriminator.
+        """Forward pass through one PQMF subband stack.
 
         Args:
             x: Input waveform of shape (B, 1, T).
@@ -132,14 +135,14 @@ class DiscriminatorP(nn.Module):
         return self.proj(x).flatten(1)
 
 
-class MultiPeriodDiscriminator(nn.Module):
-    """Multi-period discriminator combining multiple DiscriminatorP instances.
+class MultiBandDiscriminator(nn.Module):
+    """Stacks BandDiscriminator instances at coprime PQMF subband counts.
 
     Args:
-        periods: List of periods (coprime values recommended).
+        periods: PQMF subband counts (coprime values recommended).
         cutoffs: PQMF cutoff frequencies for each period.
-        taps: PQMF filter taps.
-        beta: PQMF Kaiser window beta parameter.
+        taps: Shared PQMF filter taps.
+        beta: Shared PQMF Kaiser window beta parameter.
     """
 
     def __init__(
@@ -150,39 +153,50 @@ class MultiPeriodDiscriminator(nn.Module):
         beta: float = 8.0,
     ) -> None:
         super().__init__()
+
         self.discriminators = nn.ModuleList(
             [
-                DiscriminatorP(period=p, taps=taps, cutoff=c, beta=beta)
+                BandDiscriminator(period=p, taps=taps, cutoff=c, beta=beta)
                 for p, c in zip(periods, cutoffs)
             ]
         )
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """Forward pass through all period discriminators.
+        """Forward pass through all band discriminators.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            List of logits from each discriminator.
+            List of logits, one per subband configuration.
         """
         return [disc(x) for disc in self.discriminators]
 
 
-class DiscriminatorR(nn.Module):
-    """Resolution discriminator operating on complex STFT spectrogram.
+class TierDiscriminator(nn.Module):
+    """Single-tier discriminator on a stratified complex STFT.
+
+    Subsamples the complex STFT along the frequency axis at stride ``stride``
+    so the conv stack sees one tier of evenly-interleaved bins spanning DC
+    to Nyquist, giving uniform attention across the spectrum.
 
     Args:
         n_fft: FFT size for STFT.
         win_length: Window length for STFT.
         hop_length: Hop length for STFT.
+        stride: Frequency-axis stride defining this tier.
     """
 
     def __init__(
-        self, n_fft: int = 1024, win_length: int = 1024, hop_length: int = 256
+        self,
+        n_fft: int = 1024,
+        win_length: int = 1024,
+        hop_length: int = 256,
+        stride: int = 1,
     ) -> None:
         super().__init__()
 
+        self.stride = stride
         self.spec = T.Spectrogram(
             n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=None
         )
@@ -200,7 +214,7 @@ class DiscriminatorR(nn.Module):
         self.proj = weight_norm(nn.Conv2d(256, 1, (3, 3), (1, 1), (1, 1)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through resolution discriminator.
+        """Forward pass through one stratified STFT tier.
 
         Args:
             x: Input waveform of shape (B, 1, T).
@@ -209,7 +223,7 @@ class DiscriminatorR(nn.Module):
             Discriminator logits of shape (B, N).
         """
         spec = self.spec(x.squeeze(1))
-        spec = spec[:, :-1, :-1]  # Omit Nyquist and last frame
+        spec = spec[:, : -1 : self.stride, :-1]
 
         x = torch.view_as_real(spec)
         x = x.permute(0, 3, 2, 1)  # (B, 2, T, F)
@@ -220,84 +234,93 @@ class DiscriminatorR(nn.Module):
         return self.proj(x).flatten(1)
 
 
-class MultiResolutionDiscriminator(nn.Module):
-    """Multi-resolution discriminator combining multiple DiscriminatorR instances.
+class MultiTierDiscriminator(nn.Module):
+    """Stacks TierDiscriminator instances at multiple STFT resolutions.
 
     Args:
-        n_ffts: FFT sizes for each resolution.
-        hop_lengths: Hop lengths for each resolution.
-        win_lengths: Window lengths for each resolution.
+        n_ffts: FFT sizes per tier.
+        win_lengths: Window lengths per tier.
+        hop_lengths: Hop lengths per tier.
+        strides: Frequency-axis stride per tier.
     """
 
     def __init__(
-        self, n_ffts: List[int], win_lengths: List[int], hop_lengths: List[int]
+        self,
+        n_ffts: List[int],
+        win_lengths: List[int],
+        hop_lengths: List[int],
+        strides: List[int],
     ) -> None:
         super().__init__()
-        assert len(n_ffts) == len(win_lengths) == len(hop_lengths)
+        assert len(n_ffts) == len(win_lengths) == len(hop_lengths) == len(strides)
 
         self.discriminators = nn.ModuleList(
             [
-                DiscriminatorR(n_fft=n, win_length=w, hop_length=h)
-                for n, w, h in zip(n_ffts, win_lengths, hop_lengths)
+                TierDiscriminator(n_fft=n, win_length=w, hop_length=h, stride=s)
+                for n, w, h, s in zip(n_ffts, win_lengths, hop_lengths, strides)
             ]
         )
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """Forward pass through all resolution discriminators.
+        """Forward pass through all stratified STFT tiers.
 
         Args:
             x: Input waveform of shape (B, 1, T).
 
         Returns:
-            List of logits from each discriminator.
+            List of logits, one per tier.
         """
         return [disc(x) for disc in self.discriminators]
 
 
-class MultiScaleDiscriminators(nn.Module):
-    """Multi-scale discriminators combining MPD and MS-STFT style MRD.
+class AudioDiscriminator(nn.Module):
+    """Top-level discriminator combining a multi-band PQMF discriminator
+    and a multi-tier STFT discriminator.
 
     Args:
-        periods: Periods for MultiPeriodDiscriminator.
-        cutoffs: PQMF cutoff frequencies for each period.
-        n_ffts: FFT sizes for MultiResolutionDiscriminator.
-        win_lengths: Window lengths for MultiResolutionDiscriminator.
-        hop_lengths: Hop lengths for MultiResolutionDiscriminator.
+        subband_periods: PQMF subband counts per band sub-discriminator.
+        subband_cutoffs: PQMF cutoff frequencies for each subband period.
+        n_ffts: FFT sizes per STFT tier.
+        win_lengths: Window lengths per STFT tier.
+        hop_lengths: Hop lengths per STFT tier.
+        tier_strides: Frequency-axis strides for tier stratification.
     """
 
     def __init__(
         self,
-        periods: List[int],
-        cutoffs: List[float],
+        subband_periods: List[int],
+        subband_cutoffs: List[float],
         n_ffts: List[int],
         win_lengths: List[int],
         hop_lengths: List[int],
+        tier_strides: List[int],
     ) -> None:
         super().__init__()
-        self.mpd = MultiPeriodDiscriminator(periods=periods, cutoffs=cutoffs)
-        self.mrd = MultiResolutionDiscriminator(
-            n_ffts=n_ffts, win_lengths=win_lengths, hop_lengths=hop_lengths
+
+        self.band_disc = MultiBandDiscriminator(subband_periods, subband_cutoffs)
+        self.tier_disc = MultiTierDiscriminator(
+            n_ffts, win_lengths, hop_lengths, tier_strides
         )
 
     def forward(
         self, fakes: torch.Tensor, reals: torch.Tensor | None = None
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Process waveforms through MPD and MRD discriminators.
+        """Process waveforms through the band and tier discriminators.
 
         Args:
             fakes: Fake waveforms of shape (B, 1, T).
-            reals: Optional real waveforms. If provided, batches with fakes for efficiency.
+            reals: Optional real waveforms. If provided, batched with fakes for efficiency.
 
         Returns:
             Tuple of (fake_logits, real_logits).
             If reals is None, real_logits is an empty list.
         """
         if reals is None:
-            fake_logits = self.mpd(fakes) + self.mrd(fakes)
+            fake_logits = self.band_disc(fakes) + self.tier_disc(fakes)
             return fake_logits, []
 
         combined = torch.cat([fakes, reals], dim=0)
-        all_logits = self.mpd(combined) + self.mrd(combined)
+        all_logits = self.band_disc(combined) + self.tier_disc(combined)
 
         pairs = [logits.chunk(2, dim=0) for logits in all_logits]
         fake_logits, real_logits = zip(*pairs)

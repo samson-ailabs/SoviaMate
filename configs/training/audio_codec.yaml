@@ -108,12 +108,13 @@ task:
       sv_embedding_size: *speaker_dim
 
     discriminator:
-      _target_: soviamate.modules.discriminator.MultiScaleDiscriminators
-      periods: [2, 3, 5, 7, 11]
-      cutoffs: [0.253881, 0.170546, 0.103881, 0.075310, 0.049338]
+      _target_: soviamate.modules.discriminator.AudioDiscriminator
+      subband_periods: [2, 3, 5, 7, 11]
+      subband_cutoffs: [0.253881, 0.170546, 0.103881, 0.075310, 0.049338]
       n_ffts: [512, 1024, 2048]
       win_lengths: [512, 1024, 2048]
       hop_lengths: [128, 256, 512]
+      tier_strides: [2, 4, 8]
 
     audio_loss:
       _target_: soviamate.modules.criterion.MelSpectralEnergyDistanceLoss
