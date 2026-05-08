@@ -22,6 +22,7 @@ import torchaudio
 
 from soviamate.layers.campplus import CAMPPlus
 from soviamate.layers.eres2netv2 import ERes2NetV2
+from soviamate.layers.processor import KaldiFbank
 from soviamate.utils.helper import make_padding_mask
 
 
@@ -260,18 +261,19 @@ class MemoryAugmentedAdapter(nn.Module):
 
 
 class GlobalSpeakerAdapter(nn.Module):
-    """Extract utterance-level speaker embedding via a frozen speaker
-    verification model for AdaLN conditioning in the decoder.
+    """Extract utterance-level speaker embedding directly from raw audio.
 
     Args:
-        n_mels (int): Number of mel filterbank channels. Defaults to 80.
+        sample_rate (int): Audio sample rate in Hz. Defaults to ``16000``.
+        n_mels (int): Number of mel filterbank channels. Defaults to ``80``.
         encoder_type (Literal["campplus", "eres2net"]): Speaker encoder type.
-        sv_checkpoint (str): Path to pretrained speaker encoder checkpoint.
-        sv_embedding_size (int): Output embedding dimension. Defaults to 192.
+        sv_checkpoint (str): Path to the pretrained speaker encoder checkpoint.
+        sv_embedding_size (int): Output embedding dimension. Defaults to ``192``.
     """
 
     def __init__(
         self,
+        sample_rate: int = 16000,
         n_mels: int = 80,
         encoder_type: Literal["campplus", "eres2net"] = "campplus",
         sv_checkpoint: str = "",
@@ -280,6 +282,7 @@ class GlobalSpeakerAdapter(nn.Module):
         super().__init__()
 
         self.embedding_size = sv_embedding_size
+        self.fbank = KaldiFbank(sample_rate=sample_rate, n_mels=n_mels)
 
         if encoder_type == "eres2net":
             self.sv_model = ERes2NetV2(
@@ -305,17 +308,17 @@ class GlobalSpeakerAdapter(nn.Module):
         self.sv_model.eval()
         return self
 
-    @torch.no_grad()
     def forward(
-        self, prompt_fbanks: torch.Tensor, prompt_fbank_lengths: torch.Tensor
+        self, audios: torch.Tensor, audio_lengths: torch.Tensor
     ) -> torch.Tensor:
-        """Extract utterance-level speaker embedding from fbank features.
+        """Extract utterance-level speaker embedding from raw audio.
 
         Args:
-            prompt_fbanks (Tensor): Precomputed fbank of shape (B, T, n_mels).
-            prompt_fbank_lengths (Tensor): Fbank feature lengths of shape (B,).
+            audios (Tensor): Audio waveforms, shape ``(B, T)`` or ``(B, T, 1)``.
+            audio_lengths (Tensor): Per-sample valid sample counts, shape ``(B,)``.
 
         Returns:
-            Tensor: Speaker embedding of shape (B, embedding_size).
+            Tensor: Speaker embeddings, shape ``(B, sv_embedding_size)``.
         """
-        return self.sv_model(prompt_fbanks.transpose(1, 2), prompt_fbank_lengths)
+        features, feat_lengths = self.fbank(audios, audio_lengths)
+        return self.sv_model(features, feat_lengths)

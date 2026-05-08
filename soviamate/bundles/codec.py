@@ -20,7 +20,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torchaudio
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 
@@ -119,9 +118,6 @@ class AudioCodecBundle(nn.Module):
         device: Optional[Union[str, torch.device]] = None,
     ):
         super().__init__()
-
-        self.n_mels = 80  # Must match speaker adapter config
-        self.sample_rate = 16000  # Must match speaker adapter config
 
         self.audio_encoder = audio_encoder
         self.audio_quantizer = audio_quantizer
@@ -324,45 +320,6 @@ class AudioCodecBundle(nn.Module):
             prompt_audio_lengths=prompt_audio_lengths,
         )
 
-    def _compute_fbank(
-        self, audios: torch.Tensor, audio_lengths: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute kaldi fbank features with cepstral mean normalization.
-
-        Args:
-            audios: Batched waveform of shape (B, T, 1).
-            audio_lengths: Actual lengths in samples of shape (B,).
-
-        Returns:
-            fbanks: Padded fbank features of shape (B, T', n_mels).
-            fbank_lengths: Feature lengths of shape (B,).
-        """
-        batch_size = audios.size(0)
-        device = audios.device
-
-        fbanks, fbank_lengths = [], []
-        for i in range(batch_size):
-            length = audio_lengths[i].item()
-            wav = audios[i, :length, 0].unsqueeze(0)
-
-            fbank = torchaudio.compliance.kaldi.fbank(
-                wav, num_mel_bins=self.n_mels, sample_frequency=self.sample_rate
-            )
-            fbank = fbank - fbank.mean(dim=0, keepdim=True)
-
-            fbanks.append(fbank)
-            fbank_lengths.append(fbank.size(0))
-
-        max_len = max(fbank_lengths)
-        padded_fbank = torch.zeros(
-            batch_size, max_len, self.n_mels, device=device, dtype=audios.dtype
-        )
-        for i, fbank in enumerate(fbanks):
-            padded_fbank[i, : fbank.size(0)] = fbank
-
-        fbank_lengths = torch.tensor(fbank_lengths, dtype=torch.long, device=device)
-        return padded_fbank, fbank_lengths
-
     def _ctc_collapse(
         self, tokens: torch.Tensor, blank: int = 0, last_token: int = -1
     ) -> Tuple[str, int]:
@@ -454,11 +411,8 @@ class AudioCodecBundle(nn.Module):
         speaker_embeddings = None
 
         if self.speaker_adapter is not None and codec_inputs.prompt_audios is not None:
-            prompt_fbanks, prompt_fbank_lengths = self._compute_fbank(
-                codec_inputs.prompt_audios, codec_inputs.prompt_audio_lengths
-            )
             speaker_embeddings = self.speaker_adapter(
-                prompt_fbanks, prompt_fbank_lengths
+                codec_inputs.prompt_audios, codec_inputs.prompt_audio_lengths
             )
 
         # Decode with speaker conditioning; clamp output to source length so
@@ -610,8 +564,7 @@ class AudioCodecBundle(nn.Module):
                 [prompt.size(1)], dtype=torch.long, device=self.device
             )
 
-            fbanks, fbank_lengths = self._compute_fbank(prompt, length)
-            speaker_embeddings = self.speaker_adapter(fbanks, fbank_lengths)
+            speaker_embeddings = self.speaker_adapter(prompt, length)
 
         return CodecStreamState(
             chunk_size=chunk_size,

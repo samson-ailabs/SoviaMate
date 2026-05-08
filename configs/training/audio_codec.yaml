@@ -14,21 +14,6 @@ task:
       filepaths: /data/Libri-Heavy/trainset.jsonl
       tokenizer: *tokenizer
 
-      transforms:
-        spectral:
-          _target_: soviamate.datas.transform.SpectralPerturbation
-          num_peak: 8
-          q_min: 2.0
-          q_max: 5.0
-          probability: 0.2
-
-        voice:
-          _target_: soviamate.datas.transform.VoicePerturbation
-          formant_shift: 1.4
-          pitch_shift: 2.0
-          pitch_range: 1.5
-          probability: 0.2
-
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
       filepaths: /data/Libri-Heavy/valset.jsonl
@@ -42,7 +27,6 @@ task:
   model:
     d_model: &d_model 1024
     speaker_dim: &speaker_dim 192
-    recon_grad_scale: 0.2
 
     hop_length: &hop_length 640
     frame_stacking: &frame_stacking 1
@@ -62,12 +46,6 @@ task:
       dropout: 0.1
       dynamic_chunk_sizes: *dynamic_chunk_sizes
       full_context_prob: *full_context_prob
-
-    # splice_out:
-    #   _target_: soviamate.layers.processor.SpliceOutProcessor
-    #   num_splices: 4
-    #   max_splice_length: 5
-    #   probability: 0.5
 
     text_decoder:
       _target_: soviamate.modules.decoder.TextDecoder
@@ -101,11 +79,18 @@ task:
       fsq_levels: [5, 5, 5, 5, 5]
       noise_dropout: 0.5
 
-    # Speaker adapter for inference only (frozen, not trained)
     speaker_adapter:
-      _target_: soviamate.modules.adapter.SpeakerAdapter
+      _target_: soviamate.modules.adapter.GlobalSpeakerAdapter
       sv_checkpoint: checkpoints/speaker_verification/campplus.bin
       sv_embedding_size: *speaker_dim
+      sample_rate: 16000
+      n_mels: 80
+
+    timbre_grl:
+      input_dim: *d_model
+      hidden_dim: 512
+      output_dim: *speaker_dim
+      coef: 1.0
 
     discriminator:
       _target_: soviamate.modules.discriminator.AudioDiscriminator
@@ -128,15 +113,6 @@ task:
     text_loss:
       _target_: soviamate.modules.criterion.SequenceToSequenceLoss
       zero_infinity: true
-
-    # speaker_loss:
-    #   _target_: soviamate.modules.criterion.SequenceContrastiveLoss
-    #   input_dim: *d_model
-    #   projector_dim: 4096
-    #   lambda_inv: 25.0
-    #   lambda_var: 25.0
-    #   lambda_cov: 1.0
-    #   variance_gamma: 1.0
 
   optim:
     total_steps: &total_steps 1000000

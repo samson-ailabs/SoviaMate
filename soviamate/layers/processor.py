@@ -20,8 +20,11 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torchaudio
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
+
+from soviamate.utils.helper import make_padding_mask
 
 # β < 1 compresses dynamic range of the |s|^β · cos φ, |s|^β · sin φ streams.
 POWER_COMPRESSION_BETA: float = 0.3
@@ -149,7 +152,98 @@ class SpectralSynthesizer(nn.Module):
         return waveforms, output_lengths
 
 
-class SpecAugmentProcessor(nn.Module):
+class KaldiFbank(nn.Module):
+    r"""Batched, differentiable kaldi-compatible log-mel filterbank.
+
+    Approximates ``torchaudio.compliance.kaldi.fbank`` (``dither=0``) with
+    batched PyTorch ops, eliminating the per-utterance Python loop.
+
+    Args:
+        sample_rate (int): Audio sample rate in Hz. Default: ``16000``.
+        n_mels (int): Number of mel filterbank channels. Default: ``80``.
+        frame_length_ms (float): Frame length in ms. Default: ``25.0``.
+        frame_shift_ms (float): Frame shift in ms. Default: ``10.0``.
+        preemphasis (float): Pre-emphasis coefficient. Default: ``0.97``.
+        f_min (float): Lowest mel band cutoff in Hz. Default: ``20.0``.
+        f_max (float): Highest mel band cutoff in Hz; ``0`` resolves to
+            ``sample_rate / 2``. Default: ``0.0``.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        n_mels: int = 80,
+        frame_length_ms: float = 25.0,
+        frame_shift_ms: float = 10.0,
+        preemphasis: float = 0.97,
+        f_min: float = 20.0,
+        f_max: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        self.preemphasis = preemphasis
+        self.frame_length = int(round(frame_length_ms * sample_rate / 1000.0))
+        self.frame_shift = int(round(frame_shift_ms * sample_rate / 1000.0))
+        self.n_fft = 1 << (self.frame_length - 1).bit_length()
+        self.energy_floor = torch.finfo(torch.float32).eps
+
+        # Povey window = Hann^0.85 (kaldi's default window_type).
+        window = torch.hann_window(self.frame_length, periodic=False).pow(0.85)
+        self.register_buffer("window", window)
+
+        # HTK mel filterbank, kaldi convention (no normalization).
+        mel_banks = torchaudio.functional.melscale_fbanks(
+            n_freqs=self.n_fft // 2 + 1,
+            f_min=f_min,
+            f_max=f_max if f_max > 0 else sample_rate / 2.0,
+            n_mels=n_mels,
+            sample_rate=sample_rate,
+            norm=None,
+            mel_scale="htk",
+        )
+        self.register_buffer("mel_banks", mel_banks)
+
+    def forward(
+        self, waveforms: torch.Tensor, lengths: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Compute log-mel filterbank features.
+
+        Args:
+            waveforms (Tensor): Audio waveforms, shape ``(B, T)`` or ``(B, T, 1)``.
+            lengths (Tensor): Per-sample valid sample counts, shape ``(B,)``.
+
+        Returns:
+            Tuple[Tensor, Tensor]: ``(features, feat_lengths)`` with shapes
+                ``(B, n_mels, T')`` and ``(B,)``.
+        """
+        if waveforms.dim() == 3:
+            waveforms = waveforms.squeeze(-1)
+
+        # Snip-edges framing, per-frame DC removal, then pre-emphasis.
+        frames = waveforms.unfold(-1, self.frame_length, self.frame_shift)
+        frames = frames - frames.mean(dim=-1, keepdim=True)
+        frames = torchaudio.functional.preemphasis(frames, coeff=self.preemphasis)
+
+        # Window, rfft, power spectrum.
+        spectrum = torch.fft.rfft(frames * self.window, n=self.n_fft)
+        power = spectrum.abs().square()
+
+        # Mel filterbank, then log with kaldi's energy floor.
+        log_mel = torch.log((power @ self.mel_banks).clamp(min=self.energy_floor))
+
+        # Mask trailing frames that fall outside each sample's valid region.
+        feat_lengths = (lengths - self.frame_length) // self.frame_shift + 1
+        valid_mask = (~make_padding_mask(feat_lengths)).to(log_mel.dtype).unsqueeze(-1)
+        log_mel = log_mel * valid_mask
+
+        # Cepstral mean normalization (per-sample mean over valid frames).
+        cmn_mean = log_mel.sum(dim=1) / feat_lengths.clamp(min=1).unsqueeze(-1)
+        log_mel = (log_mel - cmn_mean.unsqueeze(1)) * valid_mask
+
+        return log_mel.transpose(1, 2), feat_lengths
+
+
+class SpecAugment(nn.Module):
     r"""SpecAugment-style masking for hidden representations.
 
     Applies time and hidden dimension masking to learned features
@@ -284,7 +378,7 @@ class SpecAugmentProcessor(nn.Module):
         return features
 
 
-class SpliceOutProcessor(nn.Module):
+class SpliceOut(nn.Module):
     r"""SpliceOut Audio Augmentation for ASR Decoder Training.
 
     Removes contiguous time-step segments from feature sequences and concatenates
