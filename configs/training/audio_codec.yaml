@@ -14,6 +14,21 @@ task:
       filepaths: /data/Libri-Heavy/trainset.jsonl
       tokenizer: *tokenizer
 
+      transforms:
+        spectral:
+          _target_: soviamate.datas.transform.SpectralPerturbation
+          num_peak: 8
+          q_min: 2.0
+          q_max: 5.0
+          probability: 0.3
+
+        voice:
+          _target_: soviamate.datas.transform.VoicePerturbation
+          formant_shift: 1.4
+          pitch_shift: 1.0
+          pitch_range: 1.0
+          probability: 0.3
+
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
       filepaths: /data/Libri-Heavy/valset.jsonl

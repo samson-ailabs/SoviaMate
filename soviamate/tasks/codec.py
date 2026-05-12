@@ -133,12 +133,6 @@ class AudioCodecTask(L.LightningModule):
         else:
             self.timbre_grl = None
 
-        # Frozen speaker adapter for AdaLN conditioning
-        if hasattr(model, "speaker_adapter"):
-            self.speaker_adapter = instantiate(model.speaker_adapter)
-        else:
-            self.speaker_adapter = None
-
     def train_dataloader(self) -> DataLoader:
         trainset = instantiate(
             self.hparams.data.trainset,
@@ -308,22 +302,7 @@ class AudioCodecTask(L.LightningModule):
                 speaker_embeddings,
             )
 
-        speaker_loss = 0.0
-        if self.speaker_adapter is not None and random.random() < 0.5:
-            speaker_loss = self._compute_speaker_loss(
-                quantized_features,
-                quantized_feature_lengths,
-                speaker_embeddings,
-                target_audio_lengths,
-            )
-
-        train_loss = (
-            2.0 * audio_loss
-            + gen_loss
-            + 3.0 * text_loss
-            + timbre_loss
-            + 0.1 * speaker_loss
-        )
+        train_loss = 2.0 * audio_loss + gen_loss + 3.0 * text_loss + timbre_loss
         self.manual_backward(train_loss)
 
         gen_optim.step()
@@ -340,9 +319,6 @@ class AudioCodecTask(L.LightningModule):
 
         if timbre_loss > 0 and self.timbre_grl is not None:
             log_dict["train_timbre_loss"] = timbre_loss
-
-        if speaker_loss > 0 and self.speaker_adapter is not None:
-            log_dict["train_speaker_loss"] = speaker_loss
 
         if text_loss > 0 and self.text_loss is not None:
             log_dict["train_text_loss"] = text_loss
@@ -472,49 +448,6 @@ class AudioCodecTask(L.LightningModule):
         loss_quantizer = 1.0 - sim_quantizer.square().mean()
 
         return 0.5 * (loss_encoder + loss_quantizer)
-
-    def _compute_speaker_loss(
-        self,
-        quantized_features: torch.Tensor,
-        quantized_feature_lengths: torch.Tensor,
-        speaker_embeddings: torch.Tensor,
-        target_audio_lengths: torch.Tensor,
-    ) -> torch.Tensor:
-        """Triplet speaker-similarity loss on the swap output.
-
-        Args:
-            quantized_features (Tensor): Post-quantizer features, shape ``(B, T, D)``.
-            quantized_feature_lengths (Tensor): Per-sample lengths, shape ``(B,)``.
-            speaker_embeddings (Tensor): Source-speaker embeds, shape ``(B, E)``.
-            target_audio_lengths (Tensor): Target waveform lengths, shape ``(B,)``.
-
-        Returns:
-            Tensor: Triplet margin loss, averaged over batch.
-        """
-        shuffle_indices = torch.randperm(
-            speaker_embeddings.size(0), device=speaker_embeddings.device
-        )
-        shuffled_embeddings = speaker_embeddings[shuffle_indices]
-
-        converted_audios, converted_audio_lengths = self.audio_decoder(
-            quantized_features.detach(),
-            quantized_feature_lengths,
-            shuffled_embeddings,
-            target_audio_lengths.max().item(),
-        )
-
-        converted_audio_embeddings = self.speaker_adapter(
-            converted_audios, converted_audio_lengths
-        )
-
-        sim_target = F.cosine_similarity(
-            converted_audio_embeddings, shuffled_embeddings.detach(), dim=-1
-        )
-        sim_source = F.cosine_similarity(
-            converted_audio_embeddings, speaker_embeddings.detach(), dim=-1
-        )
-
-        return F.relu(sim_source - sim_target + 1.0).mean()
 
     def configure_optimizers(self):
         disc_optim = instantiate(
