@@ -72,7 +72,9 @@ class WavLMSpeakerEncoder(ECAPATDNNHead):
         super().__init__()
         self.device = device
 
-        self.feature_extract = torch.hub.load("s3prl/s3prl", "wavlm_large")
+        self.feature_extract = torch.hub.load(
+            "s3prl/s3prl:main", "wavlm_large", trust_repo=True
+        )
         state = torch.load(sv_checkpoint, map_location="cpu", weights_only=True)
 
         self.load_state_dict(state.get("model", state), strict=False)
