@@ -1,8 +1,8 @@
 [project]
 name = "soviamate"
 version = "0.1.0"
-description = "SoviaMate - a framework for Conversational AI"
-authors = [{ name = "Samson", email = "samson-voice@gmail.com" }]
+description = "SoviaMate: open research toward end-to-end spoken dialogue systems, starting with a neural audio codec for LLM integration."
+authors = [{ name = "Son Dang Dinh (Samson)", email = "samson.ailabs@gmail.com" }]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"

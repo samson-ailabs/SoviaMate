@@ -3,9 +3,9 @@
 This document outlines the coding standards for SoviaMate. All contributors must follow these guidelines to maintain consistency and readability.
 
 ## 1. General Guidelines
-- Use **Python 3.11+** features when available.
+- Target **Python 3.12** (see `pyproject.toml`).
 - Follow **PEP 8** for code style and formatting.
-- Ensure all code is **type-hinted** and properly documented.
+- All public functions and class methods should be **type-hinted**.
 - Keep code **modular**, **readable**, and **reusable**.
 
 ## 2. Formatting
@@ -68,14 +68,12 @@ This document outlines the coding standards for SoviaMate. All contributors must
   ```
 
 ## 7. Testing
-- All code must include unit tests using **pytest**.
-- Ensure **≥ 90% code coverage**.
-- Write test functions in `tests/`.
+- New non-trivial logic should ship with **pytest** tests under `tests/`.
+- The test suite is currently minimal; growing coverage is an ongoing effort and contributions are welcome.
 
 ## 8. Linting & Formatting
-- Use **black** for auto-formatting.
-- Use **pylint** for linting.
-- Use **mypy** for type checking.
+- Use **ruff** for linting and auto-formatting (configured in `pyproject.toml`).
+- Use **mypy** for static type checking.
 
 ## 9. Git Commit Guidelines
 - Use clear, descriptive commit messages.

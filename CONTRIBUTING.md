@@ -1,60 +1,58 @@
 # Contributing to SoviaMate
 
-Thank you for your interest in contributing to SoviaMate! We welcome contributions from the community to help improve and expand the project. Please follow the guidelines below to ensure a smooth collaboration.
+SoviaMate is an open research effort and we welcome contributions of all kinds — code, evaluation, documentation, datasets, and research discussion. This guide explains how to get involved.
 
-## How to Contribute
+## Ways to contribute
 
-### 1. Reporting Issues
-If you encounter bugs, unexpected behavior, or have suggestions for improvements, please open an issue.
-- Search existing issues to avoid duplicates.
-- Provide clear details, including steps to reproduce the issue.
+### Good first contributions
+If you are looking for a concrete starting point, these areas are useful, well-scoped, and reviewer-friendly:
 
-### 2. Feature Requests
-We appreciate ideas for new features! Before submitting a request, check the issue tracker to see if it's already being discussed. If not, open a new issue and explain:
-- The problem your feature solves.
-- Why it would benefit the project.
-- Any relevant technical details.
+- **Dataset adapters** — readers/manifests for additional speech corpora (Common Voice, GigaSpeech, VCTK, expressive corpora) that plug into `soviamate.datas`.
+- **Evaluation scripts & reports** — extend `scripts/eval_audio_codec.py` with objective metrics (PESQ, ViSQOL, STOI, WER, SECS) and reproducible benchmark tables against EnCodec / SoundStream / DAC.
+- **Multilingual tokenizers** — train and contribute SentencePiece tokenizers for languages beyond English (see `scripts/prepare_tokenizer.py`).
+- **Tests** — unit tests for `soviamate.modules` and `soviamate.layers` (the test suite is currently minimal).
+- **Inference & demo tooling** — a minimal `infer.py` for encode/decode round-trips, plus a small streaming demo.
+- **Documentation** — improve module docstrings, add diagrams, or write tutorials.
 
-### 3. Code Contributions
-#### Fork and Clone the Repository
-1. Fork the repository on GitHub.
-2. Clone your forked repository:
+### Research contributions
+If you want to engage at the research level — codec architectures, LLM integration, dialogue systems — please open a **GitHub Discussion** or email **[samson.ailabs@gmail.com](mailto:samson.ailabs@gmail.com)** before starting large work, so we can align on scope.
+
+### Reporting issues
+- Search existing issues first to avoid duplicates.
+- Include reproduction steps, expected vs. actual behavior, environment info (OS, Python, GPU, CUDA, package versions), and a minimal example where possible.
+
+### Feature requests
+Open an issue describing the problem the feature solves, the proposed approach, and any references. For larger changes please discuss before implementing.
+
+## Development workflow
+
+1. **Fork** the repository on GitHub.
+2. **Clone** your fork:
    ```sh
    git clone https://github.com/your-username/SoviaMate.git
-   ```
-3. Navigate to the project directory:
-   ```sh
    cd SoviaMate
    ```
-
-#### Set Up the Development Environment
-Follow the instructions in the `README.md` file to set up SoviaMate on your local machine.
-
-#### Create a New Branch
-Before making changes, create a new branch:
-```sh
-git checkout -b feature/your-feature-name
-```
-
-#### Make Your Changes
-- Follow the project's [coding style](CODING_STYLE.md) and best practices.
-- Write clear and concise commit messages.
-- Test your changes thoroughly.
-
-#### Submit a Pull Request
-1. Push your branch to your forked repository:
+3. **Set up** the environment as described in [`README.md`](README.md) (`uv sync --frozen`).
+4. **Create a feature branch**:
    ```sh
-   git push origin feature/your-feature-name
+   git checkout -b feature/your-feature-name
    ```
-2. Open a pull request (PR) to the `main` branch of SoviaMate.
-3. Provide a clear description of the changes in the PR.
+5. **Make your changes** following the [coding style](CODING_STYLE.md). Add or update tests in `tests/` where appropriate.
+6. **Verify** locally:
+   ```sh
+   uv run ruff check .
+   uv run mypy soviamate
+   uv run pytest
+   ```
+7. **Commit** with clear, descriptive messages.
+8. **Push** and open a pull request against `main` with a description of *what* changed and *why*.
 
-Our maintainers will review your PR, provide feedback, and merge it if approved.
+Maintainers will review, suggest changes, and merge when ready. Please be patient — this is a research project run by a small team.
 
 ## Code of Conduct
 By contributing, you agree to follow our [Code of Conduct](CODE_OF_CONDUCT.md) to ensure a welcoming environment for everyone.
 
 ## Contact
-For any questions, feel free to reach out at [samson-voice@gmail.com](mailto:samson-voice@gmail.com) or join our discussions on GitHub.
+For questions, ideas, or research collaboration: **[samson.ailabs@gmail.com](mailto:samson.ailabs@gmail.com)** or GitHub Issues / Discussions.
 
-Thank you for contributing to SoviaMate! 🚀
+Thank you for helping move spoken dialogue systems forward.

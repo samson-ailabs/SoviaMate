@@ -1,3 +1,14 @@
+# Example training config for the SoviaMate audio codec.
+#
+# Fields marked `???` are MISSING and MUST be overridden before training, e.g.:
+#   uv run python train.py --config-name audio_codec \
+#     task.data.trainset.filepaths=/path/to/trainset.jsonl \
+#     task.data.valset.filepaths=/path/to/valset.jsonl \
+#     task.model.speaker_adapter.sv_checkpoint=/path/to/campplus.bin \
+#     trainer.devices=1
+#
+# Other values are sane defaults but freely tunable.
+
 task:
   _target_: soviamate.tasks.codec.AudioCodecTask
 
@@ -11,7 +22,7 @@ task:
 
     trainset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Libri-Heavy/trainset.jsonl
+      filepaths: ???  # path to training manifest (JSONL)
       tokenizer: *tokenizer
 
       transforms:
@@ -31,7 +42,7 @@ task:
 
     valset:
       _target_: soviamate.datas.dataset.AudioCodecDataset
-      filepaths: /data/Libri-Heavy/valset.jsonl
+      filepaths: ???  # path to validation manifest (JSONL)
       tokenizer: *tokenizer
 
     loader:
@@ -96,7 +107,7 @@ task:
 
     speaker_adapter:
       _target_: soviamate.modules.adapter.GlobalSpeakerAdapter
-      sv_checkpoint: checkpoints/speaker_verification/campplus.bin
+      sv_checkpoint: ???  # path to pretrained speaker-verification checkpoint (e.g. CAM++)
       sv_embedding_size: *speaker_dim
       sample_rate: 16000
       n_mels: 80
@@ -179,12 +190,12 @@ loggers:
   tb:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     save_dir: lightning_logs
-    name: libri_heavy_codec
+    name: ???  # run name (e.g. dataset or experiment identifier)
     version: null
     default_hp_metric: false
 
 trainer:
-  devices: 8
+  devices: ???  # number of GPUs (e.g. 1 for single-GPU, 8 for full node)
   accelerator: gpu
   precision: bf16-mixed
   strategy: ddp_find_unused_parameters_true

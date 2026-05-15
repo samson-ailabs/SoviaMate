@@ -20,7 +20,7 @@ SoviaMate is committed to fostering an open, inclusive, and respectful community
 Violations of this Code of Conduct may result in warnings, temporary bans, or permanent removal from the SoviaMate community at the discretion of the maintainers.
 
 ## 5. Reporting Issues
-If you experience or witness unacceptable behavior, please report it by contacting us at [samson-voice@gmail.com](mailto:samson-voice@gmail.com). All reports will be reviewed and handled confidentially.
+If you experience or witness unacceptable behavior, please report it by contacting us at [samson.ailabs@gmail.com](mailto:samson.ailabs@gmail.com). All reports will be reviewed and handled confidentially.
 
 ## 6. Acknowledgment
 This Code of Conduct is inspired by the Contributor Covenant and other open-source community guidelines.

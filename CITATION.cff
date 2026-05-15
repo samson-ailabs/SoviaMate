@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use SoviaMate in your research, please cite it as below."
+title: "SoviaMate: Toward End-to-End Spoken Dialogue Systems"
+abstract: "An open research project building toward end-to-end spoken dialogue systems. The current release ships a neural audio codec designed for LLM integration, featuring an ASR decoder before quantization, continuous features for LLM input, enhancement-based training, and post-quantization zero-shot speaker adaptation."
+authors:
+  - given-names: "Son"
+    family-names: "Dang Dinh"
+    alias: "Samson"
+    email: "samson.ailabs@gmail.com"
+license: Apache-2.0
+repository-code: "https://github.com/samson-ailabs/SoviaMate"
+url: "https://github.com/samson-ailabs/SoviaMate"
+keywords:
+  - "spoken dialogue systems"
+  - "neural audio codec"
+  - "speech LLM"
+  - "speech-to-speech"
+  - "zero-shot voice cloning"
+  - "speech enhancement"
+version: "0.1.0"
+date-released: "2026-05-15"
