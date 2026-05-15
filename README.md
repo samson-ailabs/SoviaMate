@@ -5,13 +5,14 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.8-red.svg)](https://pytorch.org/)
+[![HuggingFace](https://img.shields.io/badge/🤗%20Hugging%20Face-SoviaMate--Codec-yellow)](https://huggingface.co/samson-ailabs/SoviaMate-Codec)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#current-status)
 
 SoviaMate is a long-term research project aiming to build an **end-to-end spoken dialogue system (SDS)**: a single model that listens, reasons, and speaks naturally, with controllable voice, robust to real-world noise, and integrable with large language models.
 
 The first released component is **SoviaMate-Codec**, a neural audio codec designed from the ground up for LLM integration. Future releases will add a speech-to-speech LLM, dialogue management, and full-pipeline streaming.
 
-> ⚠️ **Current scope**: SoviaMate is in active research. Today the repository ships the codec architecture and training pipeline. The full dialogue system is the goal, not the current deliverable. We are looking for collaborators and compute — see [Collaborate](#collaborate--research-partnerships).
+> ⚠️ **Current scope**: SoviaMate is in active research. Today we ship the codec architecture, the training pipeline, and [pretrained codec checkpoints](https://huggingface.co/samson-ailabs/SoviaMate-Codec) (alpha). The full dialogue system is the goal, not the current deliverable. We are looking for collaborators and compute — see [Collaborate](#collaborate--research-partnerships).
 
 ---
 
@@ -57,9 +58,9 @@ A more detailed architecture write-up will accompany the forthcoming technical r
 | Codec architecture (encoder / quantizer / decoder / ASR head / speaker adapter) | ✅ Implemented |
 | Multi-objective training pipeline (audio + adversarial + text losses) | ✅ Implemented |
 | Speech enhancement training (noisy → clean) | ✅ Implemented |
-| Streaming inference | ✅ Supported in architecture |
+| Streaming inference | ✅ Implemented (not yet benchmarked end-to-end) |
+| Pretrained checkpoint release | ✅ Released (alpha) — [samson-ailabs/SoviaMate-Codec](https://huggingface.co/samson-ailabs/SoviaMate-Codec) |
 | Benchmarking against EnCodec / SoundStream / DAC | 🔄 In progress |
-| Pretrained checkpoint release | 🔄 In progress |
 | Technical report / paper | 🔄 In progress |
 | LLM integration adapters | ⏳ Planned |
 | End-to-end spoken dialogue system | ⏳ Long-term goal |
@@ -82,9 +83,28 @@ cd SoviaMate
 uv sync --frozen
 ```
 
-### Pretrained codec checkpoint
-```sh
-hf download samson-ailabs/SoviaMate-Codec --local-dir models/codec
+### Inference
+
+Pretrained codec weights are published on Hugging Face at [samson-ailabs/SoviaMate-Codec](https://huggingface.co/samson-ailabs/SoviaMate-Codec) — see the model card for download recipes and the full usage API.
+
+Once weights are in `checkpoints/`, the bundle is a one-liner:
+
+```python
+from soviamate.bundles import AudioCodecBundle
+
+# Reconstruction (encode → decode)
+reconstructor = AudioCodecBundle.from_checkpoint(
+    "checkpoints/neural_audio_codec/audio_codec_base.ckpt",
+    device="cuda",  # or "cpu"
+)
+reconstructed, _ = reconstructor(source_audio)
+
+# Voice conversion — always with a speaker prompt
+voice_converter = AudioCodecBundle.from_checkpoint(
+    "checkpoints/neural_audio_codec/audio_codec_spk.ckpt",
+    device="cuda",
+)
+converted, _ = voice_converter(source_audio, prompt_audios=target_speaker_audio)
 ```
 
 ### Training
@@ -113,7 +133,7 @@ uv run python scripts/eval_audio_codec.py --help
 The repository will evolve in three releases:
 
 - **v0.1 — Codec foundation** *(current)*
-  Stable, benchmarked SoviaMate-Codec with ASR-constrained encoding, zero-shot speaker adaptation, and enhancement-trained robustness.
+  Alpha release of SoviaMate-Codec with ASR-constrained encoding, zero-shot speaker adaptation, and enhancement-trained robustness. Comprehensive benchmarking and the technical report are still in progress.
 - **v0.2 — LLM integration**
   Input/output adapters that bridge the codec's continuous features with a speech-aware LLM. Streaming speech-to-speech inference.
 - **v1.0 — End-to-end SDS**
